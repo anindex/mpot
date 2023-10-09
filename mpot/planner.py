@@ -1,7 +1,7 @@
 from typing import Any, Optional, Tuple, List, Callable
 import torch
 import numpy as np
-from mpot.ot.optimizer import optimize
+from mpot.ot.optimizer_old import optimize
 from mpot.utils.polytopes import POLYTOPE_MAP
 from mpot.utils.misc import MinMaxCenterScaler
 from mpot.gp.mp_priors_multi import BatchGPPrior

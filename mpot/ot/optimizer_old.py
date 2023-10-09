@@ -2,7 +2,7 @@ import torch
 
 from mpot.utils.polytopes import POLYTOPE_MAP, get_sampled_points_on_sphere, get_sampled_polytope_vertices
 from mpot.utils.probe import get_projecting_points, get_shifted_points
-from mpot.ot.sinkhorn import sinkhorn_knopp_stabilized
+from mpot.ot.sinkhorn_old import sinkhorn_knopp_stabilized
 
 
 def scale_cost_matrix(M):
