@@ -71,7 +71,7 @@ class Sinkhorn:
         max_iterations: int = 100,
         parallel_dual_updates: bool = False,
         initializer: Literal["default", "random"] = "default",
-        kwargs_init: Optional[Mapping[str, Any]] = None,
+        **kwargs: Any,
     ):
         self.threshold = threshold
         self.inner_iterations = inner_iterations
@@ -81,7 +81,6 @@ class Sinkhorn:
 
         self.parallel_dual_updates = parallel_dual_updates
         self.initializer = initializer
-        self.kwargs_init = {} if kwargs_init is None else kwargs_init
 
     def __call__(
         self,
@@ -95,7 +94,7 @@ class Sinkhorn:
             ot_prob, *init
         )
         final_state = self.iterations(ot_prob, (init_dual_a, init_dual_b), compute_error=compute_error)
-        return self.output_from_state(ot_prob, final_state)
+        return self.output_from_state(ot_prob, final_state), final_state
 
     def create_initializer(self) -> SinkhornInitializer:  
         if isinstance(self.initializer, SinkhornInitializer):
@@ -196,18 +195,19 @@ class Sinkhorn:
         while self._continue(state, iteration):
             state = self.one_iteration(ot_prob, state, iteration, compute_error=compute_error)
             iteration += self.inner_iterations
+        state.converged = self._converged(state, iteration)
         return state
 
 
 if __name__ == "__main__":
     from mpot.ot.problem import Epsilon
     from torch_robotics.torch_utils.torch_timer import TimerCUDA
-    epsilon = Epsilon(target=0.1, init=1., decay=0.8)
+    epsilon = Epsilon(target=0.05, init=1., decay=0.8)
     ot_prob = LinearProblem(
         torch.rand((1000, 1000)), epsilon
     )
     sinkhorn = Sinkhorn()
     with TimerCUDA() as t:
-        W = sinkhorn(ot_prob)
+        W, _ = sinkhorn(ot_prob)
     print(t.elapsed)
     print(W.shape)

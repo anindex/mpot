@@ -1,8 +1,8 @@
 from typing import Any, Optional, Tuple, List, Callable
 import torch
 import numpy as np
-from mpot.ot.optimizer_old import optimize
-from mpot.utils.polytopes import POLYTOPE_MAP
+from mpot.ot.sinkhorn_step import SinkhornStep, SinkhornStepState
+from mpot.ot.sinkhorn import Sinkhorn
 from mpot.utils.misc import MinMaxCenterScaler
 from mpot.gp.mp_priors_multi import BatchGPPrior
 from mpot.gp.gp_factor import GPFactor
@@ -12,31 +12,25 @@ from mpot.gp.unary_factor import UnaryFactor
 class MPOT(object):
 
     def __init__(
-            self,
-            traj_len: int,
-            num_particles_per_goal: int,
-            method_params: dict,
-            dt: float = 0.02,
-            step_radius: float = 0.1,
-            probe_radius: float = 0.2,
-            num_bpoint: int =100,
-            start_state: torch.Tensor = None,
-            multi_goal_states: torch.Tensor = None,
-            initial_particle_means: torch.Tensor = None,
-            pos_limits=[-10, 10],
-            vel_limits=[-10, 10],
-            random_init: bool = True,
-            polytope: str = 'orthoplex',
-            random_step: bool = False,
-            annealing: bool =False,
-            eps_annealing: float =0.05,
-            cost: Callable = None,
-            sigma_start_init: float = None,
-            sigma_goal_init: float = None,
-            sigma_gp_init: float = None,
-            seed: int = 0,
-            tensor_args=None,
-            **kwargs
+        self,
+        objective_fn: Any,
+        linear_ot_solver: Sinkhorn,
+        ss_params: dict,
+        traj_len: int = 64,
+        num_particles_per_goal: int = 16,
+        dt: float = 0.02,
+        start_state: torch.Tensor = None,
+        multi_goal_states: torch.Tensor = None,
+        initial_particle_means: torch.Tensor = None,
+        pos_limits=[-10, 10],
+        vel_limits=[-10, 10],
+        polytope: str = 'orthoplex',
+        sigma_start_init: float = 0.001,
+        sigma_goal_init: float = 1.,
+        sigma_gp_init: float = 0.001,
+        seed: int = 0,
+        tensor_args=None,
+        **kwargs
     ):
         self.traj_len = traj_len
         self.dt = dt
@@ -47,10 +41,6 @@ class MPOT(object):
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        self.num_bpoint = num_bpoint
-        self.step_radius = step_radius
-        self.probe_radius = probe_radius
-        self.method_params = method_params
         self.start_state = start_state
         self.multi_goal_states = multi_goal_states
         if multi_goal_states is None:  # NOTE: if there is no goal, we assume here is at least one goal
@@ -60,12 +50,7 @@ class MPOT(object):
             self.num_goals = multi_goal_states.shape[0]
         self.num_particles_per_goal = num_particles_per_goal
         self.num_particles = num_particles_per_goal * self.num_goals
-        self.random_init = random_init
         self.polytope = polytope
-        self.random_step = random_step
-        self.annealing = annealing
-        self.eps_annealing = eps_annealing
-        self.cost = cost
         self.sigma_start_init = sigma_start_init
         self.sigma_goal_init = sigma_goal_init
         self.sigma_gp_init = sigma_gp_init
@@ -88,6 +73,16 @@ class MPOT(object):
             self.vel_limits = self.vel_limits.unsqueeze(0).repeat(self.dim, 1)
         self.vel_scaler = MinMaxCenterScaler(dim_range=[self.dim, self.state_dim], min=self.vel_limits[:, 0], max=self.vel_limits[:, 1])
 
+        # init solver
+        self.ss_params = ss_params
+        self.sinkhorn_step = SinkhornStep(
+            self.state_dim,
+            objective_fn=objective_fn,
+            linear_ot_solver=linear_ot_solver,
+            state_scalers=[self.pos_scaler, self.vel_scaler],
+            **self.ss_params,
+        )
+
     def reset(
             self,
             start_state: torch.Tensor = None,
@@ -105,41 +100,11 @@ class MPOT(object):
         self.get_prior_dists(initial_particle_means=initial_particle_means)
 
     def get_prior_dists(self, initial_particle_means: torch.Tensor = None):
-        origin = torch.zeros(self.state_dim, **self.tensor_args)
-        if self.random_step:
-            self.step_dist = None
-            self.step_weights = None
-        else:
-            self.step_dist = POLYTOPE_MAP[self.polytope](origin, self.step_radius, num_points=self.num_bpoint)
-            self.step_weights = torch.ones(self.step_dist.shape[0], **self.tensor_args) / self.step_dist.shape[0]
-
         if initial_particle_means is None:
-            if self.random_init:
-                self.init_trajs = self.get_random_trajs()
-            else:
-                start, end = self.start_state.unsqueeze(0), self.multi_goal_states
-                self.init_trajs = self.const_vel_trajectories(start, end)
-                # copy traj for each particle
-                self.init_trajs = self.init_trajs.unsqueeze(1).repeat(1, self.num_particles_per_goal, 1, 1)
-                self.traj_dim = self.init_trajs.shape
-                self.init_trajs = self.init_trajs.flatten(0, 1)
+            self.init_trajs = self.get_random_trajs()
         else:
             self.init_trajs = initial_particle_means.clone()
         self.flatten_trajs = self.init_trajs.flatten(0, 1)
-
-    def const_vel_trajectories(
-        self,
-        start_state: torch.Tensor,
-        multi_goal_states: torch.Tensor,
-    ) -> torch.Tensor:
-        traj_dim = (multi_goal_states.shape[0], self.traj_len, self.state_dim)
-        state_traj = torch.zeros(traj_dim, **self.tensor_args)
-        mean_vel = (multi_goal_states[:, :self.dim] - start_state[:, :self.dim]) / (self.traj_len * self.dt)
-        for i in range(self.traj_len):
-            state_traj[:, i, :self.dim] = start_state[:, :self.dim] * (self.traj_len - i - 1) / (self.traj_len - 1) \
-                                  + multi_goal_states[:, :self.dim] * i / (self.traj_len - 1)
-        state_traj[:, :, self.dim:] = mean_vel.unsqueeze(1).repeat(1, self.traj_len, 1)
-        return state_traj
 
     def get_GP_prior(
             self,
@@ -215,10 +180,12 @@ class MPOT(object):
         del self._traj_dist  # free memory
         return particles.flatten(0, 1).to(**self.tensor_args)
 
-    def optimize(self, **kwargs) -> Tuple[torch.Tensor, dict]:
-        trajs, log_dict = optimize(self.step_dist, self.step_weights, self.flatten_trajs, self.cost, self.step_radius, self.probe_radius,
-                                   polytope=self.polytope, num_sphere_point=self.num_bpoint, annealing=self.annealing, eps_annealing=self.eps_annealing,
-                                   traj_dim=self.traj_dim, pos_scaler=self.pos_scaler, vel_scaler=self.vel_scaler,
-                                   **self.method_params, **kwargs)
-        trajs = trajs.view(self.traj_dim)
-        return trajs, log_dict
+    def optimize(self) -> Tuple[torch.Tensor, SinkhornStepState, int]:
+        state = self.sinkhorn_step.init_state(self.flatten_trajs)
+        iteration = 0
+        while self.sinkhorn_step._continue(state, iteration):
+            state = self.sinkhorn_step.step(state, iteration, traj_dim=self.traj_dim)
+            iteration += 1
+
+        trajs = state.X.view(self.traj_dim)
+        return trajs, state, iteration

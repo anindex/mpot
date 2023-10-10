@@ -9,8 +9,12 @@ import numpy as np
 import os
 
 from mpot.envs.map_generator import generate_obstacle_map
+from mpot.ot.problem import Epsilon, LinearEpsilon
+from mpot.ot.sinkhorn import Sinkhorn
 from mpot.planner import MPOT
 from mpot.costs import CostComposite, CostField, CostGPHolonomic
+
+from torch_robotics.torch_utils.torch_timer import TimerCUDA
 
 
 def plot_history(i):
@@ -43,7 +47,7 @@ if __name__ == "__main__":
     seed = int(time.time())
     x = np.linspace(-10, 10, 200)
     y = np.linspace(-10, 10, 200)
-    n_dof = 2  # + 2 for velocity
+    dim = 2  # state_dim = 4 for velocity
     dt = 0.1
     traj_len = 64
     view_optim = True   # plot optimization progress
@@ -56,8 +60,7 @@ if __name__ == "__main__":
     # NOTE: changing polytope may require tuning again
     polytope = 'cube'  # 'random' | 'simplex' | 'orthoplex' | 'cube'; 'random' option is added for ablations, not recommended for general use
 
-    eps_annealing = 0.02
-    num_bpoint = 50  # number of random points on the $4$-sphere, when polytope == 'random' (i.e. no polytope structure)
+    epsilon = 0.02
     num_probe = 5  # number of probes points for each polytope vertices
     num_particles_per_goal = 33  # number of plans per goal
     pos_limits = [-10, 10]
@@ -66,18 +69,8 @@ if __name__ == "__main__":
     w_smooth = 1e-7  # for tuning the GP cost: error = w_smooth * || Phi x(t) - x(1+1) ||^2
     sigma_gp = 0.13   # for tuning the GP cost: Q_c = sigma_gp^2 * I
     sigma_gp_init = 1.5   # for controlling the initial GP variance: Q0_c = sigma_gp_init^2 * I
-
-    # Sinkhorn-Knopp parameters
-    method_params = dict(
-        reg=0.01,  # entropic regularization lambda
-        num_probe=num_probe,
-        numItermax=100,
-        numInnerItermax=5,
-        stopThr=8e-2,
-        innerStopThr=1e-5,
-        verbose=False,
-    )
-
+    max_inner_iters = 100  # max inner iterations for Sinkhorn-Knopp
+    max_outer_iters = 100  # max outer iterations for MPOT
     #--------------------------------- Task Settings ----------------------------------------------
 
     start_state = torch.tensor([-9, -9], **tensor_args)
@@ -108,34 +101,46 @@ if __name__ == "__main__":
     #--------------------------------- Cost functions ---------------------------------
 
     # Construct cost function
-    cost_gp = CostGPHolonomic(n_dof, traj_len, dt, sigma_gp, [0, 1], weight=w_smooth, tensor_args=tensor_args)
-    cost_obst_2D = CostField(n_dof, [0, traj_len], field=obst_map, weight=w_coll, tensor_args=tensor_args)
+    cost_gp = CostGPHolonomic(dim, traj_len, dt, sigma_gp, [0, 1], weight=w_smooth, tensor_args=tensor_args)
+    cost_obst_2D = CostField(dim, [0, traj_len], field=obst_map, weight=w_coll, tensor_args=tensor_args)
     cost_func_list = [cost_obst_2D, cost_gp]
-    cost_composite = CostComposite(n_dof, cost_func_list, tensor_args=tensor_args)
+    objective_fn = CostComposite(dim, cost_func_list, tensor_args=tensor_args)
 
     #--------------------------------- MPOT Init ---------------------------------
-
-    mpot_params = dict(
-        traj_len=traj_len,
-        num_particles_per_goal=num_particles_per_goal,
-        method_params=method_params,
-        dt=dt,
+    # Sinkhorn-Knopp parameters
+    linear_ot_solver = Sinkhorn(
+        threshold=1e-3,
+        max_iterations=max_inner_iters
+    )
+    ent_epsilon = Epsilon(0.05)
+    ss_params = dict(
+        epsilon=epsilon,
+        ent_epsilon=ent_epsilon,
         step_radius=step_radius,
         probe_radius=probe_radius,
-        random_init=True,
-        num_bpoint=num_bpoint,
+        num_probe=num_probe,
+        min_iterations=5,
+        max_iterations=max_outer_iters,
+        threshold=2e-4,
+        store_history=True,
+        tensor_args=tensor_args,
+    )
+
+    mpot_params = dict(
+        objective_fn=objective_fn,
+        linear_ot_solver=linear_ot_solver,
+        ss_params=ss_params,
+        traj_len=traj_len,
+        num_particles_per_goal=num_particles_per_goal,
+        dt=dt,
         start_state=start_state,
         multi_goal_states=multi_goal_states,
         pos_limits=pos_limits,
         vel_limits=vel_limits,
+        polytope=polytope,
         sigma_start_init=0.001,
         sigma_goal_init=0.001,
         sigma_gp_init=sigma_gp_init,
-        polytope=polytope,
-        random_step=True,
-        annealing=True,
-        eps_annealing=eps_annealing,
-        cost=cost_composite,
         seed=seed,
         tensor_args=tensor_args,
     )
@@ -143,14 +148,14 @@ if __name__ == "__main__":
 
     #--------------------------------- Optimize ---------------------------------
 
-    time_start = time.time()
-    trajs, log_dict = mpot.optimize(log=view_optim)
+    with TimerCUDA() as t:
+        trajs, optim_state, iter = mpot.optimize()
     colls = obst_map.get_collisions(trajs[..., :2]).any(dim=1)
-    print(f'Optimization finished! Parallelization Quality (GOOD [%]): {(1 - colls.float().mean()) * 100:.2f}')
-    print(f'Time(s) optim: {time.time() - time_start} sec')
+    print(f'Optimization finished at {iter}! Parallelization Quality (GOOD [%]): {(1 - colls.float().mean()) * 100:.2f}')
+    print(f'Time(s) optim: {t.elapsed} sec')
     if view_optim:
         os.makedirs(save_path, exist_ok=True)
-        X_hist = log_dict['X_hist']
+        X_hist = optim_state.X_history[:iter]
         fig, ax = plt.subplots()
         points = []
         lines = []

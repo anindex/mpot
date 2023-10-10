@@ -11,8 +11,11 @@ class Cost(ABC):
         self.state_dim = dim * 2
         self.tensor_args = tensor_args
 
+    def __call__(self, *args: Any, **observation: Any) -> Any:
+        return self.eval(*args, **observation)
+
     @abstractmethod
-    def eval(self, points: int, observation=None):
+    def eval(self, points: torch.Tensor, observation=None):
         pass
 
 

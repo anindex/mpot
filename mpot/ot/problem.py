@@ -1,3 +1,4 @@
+from typing import Union
 import torch
 
 
@@ -39,6 +40,22 @@ class Epsilon:
     def done_at(self, iteration: int) -> bool:
         """Return whether the scheduler is done at a given iteration."""
         return self.done(self.at(iteration))
+    
+
+class LinearEpsilon(Epsilon):
+
+    def __init__(self, target: float = 0.1, 
+                 scale_epsilon: float = 1, 
+                 init: float = 1, 
+                 decay: float = 1):
+        super().__init__(target, scale_epsilon, init, decay)
+    
+    def at(self, iteration: int = 1) -> float:
+        if iteration is None:
+            return self.target
+        
+        eps = max(self._init - self._decay * iteration, self.target)
+        return eps * self._scale_epsilon
 
 
 class LinearProblem():
@@ -46,12 +63,15 @@ class LinearProblem():
     def __init__(
         self,
         C: torch.Tensor,
-        epsilon: Epsilon,
+        epsilon: Union[Epsilon, float] = 0.01,
         a: torch.Tensor = None,
         b: torch.Tensor = None,
         tau_a: float = 1.0,
         tau_b: float = 1.0,
+        scaling_cost: bool = True,
     ) -> None:
+        if scaling_cost:
+            C = scale_cost_matrix(C)
         self.C = C
         self.epsilon = epsilon
         self.a = a if a is not None else torch.ones(C.shape[0]).type_as(C)
@@ -68,21 +88,22 @@ class LinearProblem():
         Returns:
         a vector of the same size.
         """
-        return self.epsilon.target * torch.log(scaling)
+        eps = self.epsilon.target if isinstance(self.epsilon, Epsilon) else self.epsilon
+        return eps * torch.log(scaling)
 
     def marginal_from_potentials(
         self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int
     ) -> torch.Tensor:
+        eps = self.epsilon.target if isinstance(self.epsilon, Epsilon) else self.epsilon
         h = (f if dim == 1 else g)
-        z = self.apply_lse_kernel(f, g, self.epsilon.target, dim=dim)
-        return torch.exp((z + h) / self.epsilon.target)
+        z = self.apply_lse_kernel(f, g, eps, dim=dim)
+        return torch.exp((z + h) / eps)
     
     def update_potential(
         self, f: torch.Tensor, g: torch.Tensor, log_marginal: torch.Tensor,
         iteration: int = None, dim: int = 0,
     ) -> torch.Tensor:
-
-        eps = self.epsilon.at(iteration)
+        eps = self.epsilon.at(iteration) if isinstance(self.epsilon, Epsilon) else self.epsilon
         app_lse = self.apply_lse_kernel(f, g, eps, dim=dim)
         return eps * log_marginal - torch.where(torch.isfinite(app_lse), app_lse, 0)
 
@@ -90,7 +111,8 @@ class LinearProblem():
         self, f: torch.Tensor, g: torch.Tensor
     ) -> torch.Tensor:
         """Output transport matrix from potentials."""
-        return torch.exp(self._center(f, g) / self.epsilon.target)
+        eps = self.epsilon.target if isinstance(self.epsilon, Epsilon) else self.epsilon
+        return torch.exp(self._center(f, g) / eps)
 
     def apply_lse_kernel(
         self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int
@@ -98,7 +120,7 @@ class LinearProblem():
         w_res = self._softmax(f, g, eps, dim=dim)
         remove = f if dim == 1 else g
         return w_res - torch.where(torch.isfinite(remove), remove, 0)
-    
+
     def _center(self, f: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         return f.unsqueeze(1) + g.unsqueeze(0) - self.C
 
@@ -125,6 +147,7 @@ class SinkhornState():
         self.errors = errors
         self.fu = fu
         self.gv = gv
+        self.converged = False
 
     def solution_error(
         self,
@@ -141,10 +164,49 @@ class SinkhornState():
             parallel_dual_updates=parallel_dual_updates
         )
 
-    def ent_reg_cost(  # noqa: D102
+    def ent_reg_cost(
         self, ot_prob: LinearProblem,
     ) -> float:
         return ent_reg_cost(self.fu, self.gv, ot_prob)
+    
+
+class SinkhornStepState():
+    """Holds the state of the barycenter solver.
+
+    Args:
+        costs: Holds the sequence of regularized GW costs seen through the outer
+        loop of the solver.
+        linear_convergence: Holds the sequence of bool convergence flags of the
+        inner Sinkhorn iterations.
+        X: optimizing points.
+        a: weights of the barycenter. (not using)
+    """
+
+    def __init__(self,
+                 X_init: torch.Tensor,
+                 costs: torch.Tensor = None,
+                 linear_convergence: torch.Tensor = None,
+                 objective_vals: torch.Tensor = None,
+                 X_history: torch.Tensor = None,
+                 displacement_sqnorms: torch.Tensor = None,
+                 a: torch.Tensor = None) -> None:
+        self.X = X_init
+        self.costs = costs
+        self.linear_convergence = linear_convergence
+        self.objective_vals = objective_vals
+        self.X_history = X_history
+        self.displacement_sqnorms = displacement_sqnorms
+        self.a = a
+
+
+def scale_cost_matrix(M: torch.Tensor) -> torch.Tensor:
+    min_M = M.min()
+    if min_M < 0:
+        M -= min_M
+    max_M = M.max()
+    if max_M > 1.:
+        M /= max_M   # for stability
+    return M
 
 
 def phi_star(h: torch.Tensor, rho: float) -> torch.Tensor:
