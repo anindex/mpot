@@ -17,7 +17,7 @@ from mpot.ot.initializer import DefaultInitializer, RandomInitializer, SinkhornI
 
 
 class Momentum:
-    """Momentum for Sinkhorn updates.
+    """Momentum for Sinkhorn updates. Adapted from OTT-JAX
     """
 
     def __init__(
@@ -67,7 +67,7 @@ class Sinkhorn:
         self,
         threshold: float = 1e-3,
         inner_iterations: int = 1,
-        min_iterations: int = 10,
+        min_iterations: int = 1,
         max_iterations: int = 100,
         parallel_dual_updates: bool = False,
         initializer: Literal["default", "random"] = "default",
@@ -86,7 +86,7 @@ class Sinkhorn:
         self,
         ot_prob: LinearProblem,
         init: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]] = (None, None),
-        compute_error: bool = False,
+        compute_error: bool = True,
     ) -> torch.Tensor:
 
         initializer = self.create_initializer()
@@ -138,7 +138,7 @@ class Sinkhorn:
 
     def one_iteration(
         self, ot_prob: LinearProblem, state: SinkhornState,
-        iteration: int, compute_error: bool = False
+        iteration: int, compute_error: bool = True
     ) -> SinkhornState:
 
         state = self.lse_step(ot_prob, state, iteration)
@@ -156,7 +156,7 @@ class Sinkhorn:
 
     def _converged(self, state: SinkhornState, iteration: int) -> bool:
         err = state.errors[iteration // self.inner_iterations - 1]
-        return iteration > 0 and err < self.threshold
+        return iteration > self.min_iterations and err < self.threshold
 
     def _diverged(self, state: SinkhornState, iteration: int) -> bool:
         err = state.errors[iteration // self.inner_iterations - 1]
@@ -164,7 +164,7 @@ class Sinkhorn:
 
     def _continue(self, state: SinkhornState, iteration: int) -> bool:
         """Continue while not(converged) and not(diverged)."""
-        return not self._converged(state, iteration) and not self._diverged(state, iteration)
+        return iteration < self.outer_iterations and not self._converged(state, iteration) and not self._diverged(state, iteration)
 
     @property
     def outer_iterations(self) -> int:
@@ -188,7 +188,7 @@ class Sinkhorn:
         return ot_prob.transport_from_potentials(state.fu, state.gv)
 
     def iterations(
-        self, ot_prob: LinearProblem, init: Tuple[torch.Tensor, torch.Tensor], compute_error: bool = False
+        self, ot_prob: LinearProblem, init: Tuple[torch.Tensor, torch.Tensor], compute_error: bool = True
     ) -> SinkhornState:
         state = self.init_state(init)
         iteration = 0

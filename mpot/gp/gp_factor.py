@@ -50,7 +50,6 @@ class GPFactor():
         return Q_inv
 
     def get_error(self, x_traj: torch.Tensor, calc_jacobian: bool = True) -> torch.Tensor:
-        batch, horizon = x_traj.shape[0], x_traj.shape[1]
         state_1 = torch.index_select(x_traj, 1, self.idx1).unsqueeze(-1)
         state_2 = torch.index_select(x_traj, 1, self.idx2).unsqueeze(-1)
         error = state_2 - self.phi @ state_1

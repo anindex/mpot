@@ -11,18 +11,16 @@ from typing import (
     Tuple,
     Union,
 )
-import numpy as np
+
 import torch
-from mpot.ot.problem import LinearProblem, SinkhornState, Epsilon, SinkhornStepState
+from mpot.ot.problem import LinearProblem, Epsilon, SinkhornStepState
 from mpot.ot.sinkhorn import Sinkhorn
-from mpot.ot.initializer import DefaultInitializer, RandomInitializer, SinkhornInitializer
-from mpot.utils.polytopes import POLYTOPE_MAP, get_sampled_points_on_sphere, get_sampled_polytope_vertices
-from mpot.utils.probe import get_projecting_points, get_shifted_points
+from mpot.utils.polytopes import POLYTOPE_MAP, get_sampled_polytope_vertices
 from mpot.utils.misc import MinMaxCenterScaler
 
 
 class SinkhornStep():
-    """Sinkhorn Step solver for problems that use a linear problem in inner loop."""
+    """Sinkhorn Step solver."""
 
     def __init__(
         self,
@@ -69,10 +67,7 @@ class SinkhornStep():
         self.store_outer_evals = store_outer_evals
         self.store_history = store_history
 
-        # init uniform weights
         # TODO: support non-uniform weights for conditional sinkhorn step
-        # self.a = jnp.ones((num_points,)) / num_points
-        # self.b = jnp.ones((self.polytope_vertices.shape[0],)) / self.polytope_vertices.shape[0]
 
     def init_state(
         self,
@@ -86,7 +81,7 @@ class SinkhornStep():
             X_history = None
         
         if self.store_outer_evals:
-            costs = -torch.ones((num_iters, num_points)).type_as(X_init)
+            costs = -torch.ones(num_iters).type_as(X_init)
         else:
             costs = None
     
@@ -104,7 +99,7 @@ class SinkhornStep():
         )
 
     def step(self, state: SinkhornStepState, iteration: int, **kwargs) -> SinkhornStepState:
-        """Run one iteration of the Sinkhorn algorithm."""
+        """Run Sinkhorn Step."""
         X = state.X.clone()
 
         # scale state features into same range
@@ -130,20 +125,21 @@ class SinkhornStep():
                 scaler.inverse(X_probe)
 
         # solve Sinkhorn
-        C = self.objective_fn(X_probe, current_trajs=X, **kwargs) 
-        ot_prob = LinearProblem(C, self.ent_epsilon)
+        C = self.objective_fn(X_probe, current_trajs=state.X, **kwargs) 
+        ot_prob = LinearProblem(C, epsilon=self.ent_epsilon, a=state.a, scaling_cost=False)
         W, res = self.linear_ot_solver(ot_prob)
 
         # barycentric projection
         X_new = torch.einsum('bik,bi->bk', X_vertices, W / state.a.unsqueeze(-1))
-        
-        # if self.store_outer_evals:
-        #     state.costs[iteration] = self.objective_fn.cost(X_new, **kwargs)
+
+        if self.store_outer_evals:
+            state.costs[iteration] = self.objective_fn.cost(X_new, **kwargs).mean()
 
         if self.store_history:
             state.X_history[iteration] = X_new
+
         state.linear_convergence[iteration] = res.converged
-        state.displacement_sqnorms[iteration] = torch.square(X_new - X).mean()
+        state.displacement_sqnorms[iteration] = torch.square(X_new - state.X).sum()
         state.X = X_new
         return state
 

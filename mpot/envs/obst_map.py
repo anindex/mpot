@@ -137,7 +137,7 @@ class ObstacleMap:
         self.xlim = [-x_range/2, x_range/2]
         self.ylim = [-y_range/2, y_range/2]
 
-        self.c_offset = torch.Tensor([self.origin_xi, self.origin_yi]).to(**tensor_args)
+        self.c_offset = torch.tensor([self.origin_xi, self.origin_yi], **self.tensor_args)
 
     def __call__(self, X, **kwargs):
         return self.compute_cost(X, **kwargs)
@@ -171,23 +171,14 @@ class ObstacleMap:
         :return: collision cost on the trajectories
         """
         X_occ = X * (1/self.cell_size) + self.c_offset
-        X_occ = X_occ.floor()
-
-        # X_occ = X_occ.cpu().numpy().astype(np.int)
-        X_occ = X_occ.type(torch.LongTensor)
-        X_occ = X_occ.to(device=self.tensor_args['device'])
+        X_occ = X_occ.floor().int()
 
         # Project out-of-bounds locations to axis
         X_occ[...,0] = X_occ[..., 0].clamp(0, self.map.shape[0]-1)
         X_occ[...,1] = X_occ[..., 1].clamp(0, self.map.shape[1]-1)
 
         # Collisions
-        try:
-            collision_vals = self.map_torch[X_occ[..., 1], X_occ[..., 0]]
-        except Exception as e:
-            print(e)
-            print(X_occ)
-            print(X_occ.clamp(0, self.map.shape[0]-1))
+        collision_vals = self.map_torch[X_occ[..., 1], X_occ[..., 0]]
         return collision_vals
 
     def compute_cost(self, X, **kwargs):

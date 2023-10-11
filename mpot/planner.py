@@ -10,9 +10,11 @@ from mpot.gp.unary_factor import UnaryFactor
 
 
 class MPOT(object):
+    """Batch First-order Trajectory Optimization with Sinkhorn Step."""
 
     def __init__(
         self,
+        dim: int,
         objective_fn: Any,
         linear_ot_solver: Sinkhorn,
         ss_params: dict,
@@ -25,6 +27,8 @@ class MPOT(object):
         pos_limits=[-10, 10],
         vel_limits=[-10, 10],
         polytope: str = 'orthoplex',
+        fixed_start: bool = True,
+        fixed_goal: bool = False,
         sigma_start_init: float = 0.001,
         sigma_goal_init: float = 1.,
         sigma_gp_init: float = 0.001,
@@ -32,6 +36,8 @@ class MPOT(object):
         tensor_args=None,
         **kwargs
     ):
+        self.dim = dim
+        self.state_dim = dim * 2
         self.traj_len = traj_len
         self.dt = dt
         self.seed = seed
@@ -51,6 +57,8 @@ class MPOT(object):
         self.num_particles_per_goal = num_particles_per_goal
         self.num_particles = num_particles_per_goal * self.num_goals
         self.polytope = polytope
+        self.fixed_start = fixed_start
+        self.fixed_goal = fixed_goal
         self.sigma_start_init = sigma_start_init
         self.sigma_goal_init = sigma_goal_init
         self.sigma_gp_init = sigma_gp_init
@@ -91,12 +99,12 @@ class MPOT(object):
     ):
         if start_state is not None:
             self.start_state = start_state.detach().clone()
+        assert self.start_state.shape[-1] == self.state_dim, "start_state dimension should be dim * 2"
 
         if multi_goal_states is not None:
             self.multi_goal_states = multi_goal_states.detach().clone()
+        assert self.multi_goal_states.shape[-1] == self.state_dim, "multi_goal_states dimension should be dim * 2"
 
-        self.dim = self.start_state.shape[-1]
-        self.state_dim = self.dim * 2
         self.get_prior_dists(initial_particle_means=initial_particle_means)
 
     def get_prior_dists(self, initial_particle_means: torch.Tensor = None):
@@ -135,9 +143,9 @@ class MPOT(object):
         # force torch.float64
         tensor_args = dict(dtype=torch.float64, device=self.tensor_args['device'])
         # set zero velocity for GP prior
-        start_state = torch.cat((self.start_state, torch.zeros_like(self.start_state)), dim=-1).to(**tensor_args)
+        start_state = self.start_state.to(**tensor_args)
         if self.multi_goal_states is not None:
-            multi_goal_states = torch.cat((self.multi_goal_states, torch.zeros_like(self.multi_goal_states)), dim=-1).to(**tensor_args)
+            multi_goal_states = self.multi_goal_states.to(**tensor_args)
         else:
             multi_goal_states = None
         #========= Initialization factors ===============
@@ -171,8 +179,8 @@ class MPOT(object):
                 self.start_prior_init.K,
                 self.gp_prior_init.Q_inv[0],
                 self.multi_goal_prior_init[0].K if multi_goal_states is not None else None,
-                start_state,
-                goal_states=multi_goal_states,
+                start_state[..., :self.dim],
+                goal_states=multi_goal_states[..., :self.dim],
                 tensor_args=tensor_args,
             )
         particles = self._traj_dist.sample(self.num_particles_per_goal).to(**tensor_args)
@@ -185,6 +193,13 @@ class MPOT(object):
         iteration = 0
         while self.sinkhorn_step._continue(state, iteration):
             state = self.sinkhorn_step.step(state, iteration, traj_dim=self.traj_dim)
+            trajs = state.X.view(self.traj_dim)
+            # option to hard fixing start and goal states
+            if self.fixed_start:
+                trajs[:, :, 0, :] = self.start_state
+            if self.fixed_goal:
+                trajs[:, :, -1, :] = self.multi_goal_states.unsqueeze(1)
+            state.X = trajs.view(-1, self.state_dim)
             iteration += 1
 
         trajs = state.X.view(self.traj_dim)

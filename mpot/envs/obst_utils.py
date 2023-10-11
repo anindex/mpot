@@ -1,7 +1,6 @@
 from math import ceil
 import random
-import matplotlib.pyplot as plt
-from .obst_map import ObstacleRectangle, ObstacleCircle
+from mpot.envs.obst_map import ObstacleRectangle, ObstacleCircle
 
 
 def round_up(n, decimals=0):

@@ -15,7 +15,6 @@ def generate_obstacle_map(
         rand_xy_limits=None,
         rand_rect_shape=[2, 2],
         rand_circle_radius=1,
-        map_type=None,
         tensor_args=None,
 ):
 
@@ -90,12 +89,7 @@ def generate_obstacle_map(
                 num_attempts += 1
 
     obst_map.convert_map()
-
-    ## Fit mapping model
-    if map_type == 'direct':
-        return obst_map, obst_list
-    else:
-        raise IOError('Map type "{}" not recognized'.format(map_type))
+    return obst_map, obst_list
 
 
 if __name__ == "__main__":
@@ -113,7 +107,6 @@ if __name__ == "__main__":
     tensor_args = {'device': torch.device('cpu'), 'dtype': torch.float32}
     obst_map, obst_list = generate_obstacle_map(
         map_dim, obst_list, cell_size,
-        map_type='direct',
         random_gen=True,
         # random_gen=False,
         num_obst=5,

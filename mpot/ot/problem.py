@@ -3,6 +3,7 @@ import torch
 
 
 class Epsilon:
+    """Epsilon scheduler for Sinkhorn and Sinkhorn Step."""
 
     def __init__(
         self,
@@ -74,8 +75,8 @@ class LinearProblem():
             C = scale_cost_matrix(C)
         self.C = C
         self.epsilon = epsilon
-        self.a = a if a is not None else torch.ones(C.shape[0]).type_as(C)
-        self.b = b if b is not None else torch.ones(C.shape[1]).type_as(C)
+        self.a = a if a is not None else (torch.ones(C.shape[0]).type_as(C) / C.shape[0])
+        self.b = b if b is not None else (torch.ones(C.shape[1]).type_as(C) / C.shape[1])
         self.tau_a = tau_a
         self.tau_b = tau_b
 
@@ -92,7 +93,7 @@ class LinearProblem():
         return eps * torch.log(scaling)
 
     def marginal_from_potentials(
-        self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int
+        self, f: torch.Tensor, g: torch.Tensor, dim: int
     ) -> torch.Tensor:
         eps = self.epsilon.target if isinstance(self.epsilon, Epsilon) else self.epsilon
         h = (f if dim == 1 else g)
@@ -269,15 +270,14 @@ def marginal_error(
         g_v: a vector of potentials or scalings for the second marginal.
         target: target marginal.
         dim: dim (0 or 1) along which to compute marginal.
-        norm_error: (tuple of int) p's to compute p-norm between marginal/target
 
     Returns:
         Array of floats, quantifying difference between target / marginal.
     """
     marginal = ot_prob.marginal_from_potentials(f_u, g_v, dim=dim)
-    # norm_error = torch.tensor(norm_error).type_as(marginal)
+    # L1 distance between target and marginal
     return torch.sum(
-        torch.abs(marginal - target), dim=1
+        torch.abs(marginal - target)
     )
 
 

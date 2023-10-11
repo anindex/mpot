@@ -9,32 +9,12 @@ import numpy as np
 import os
 
 from mpot.envs.map_generator import generate_obstacle_map
-from mpot.ot.problem import Epsilon, LinearEpsilon
+from mpot.ot.problem import Epsilon
 from mpot.ot.sinkhorn import Sinkhorn
 from mpot.planner import MPOT
 from mpot.costs import CostComposite, CostField, CostGPHolonomic
-
+from mpot.utils.trajectory import interpolate_trajectory
 from torch_robotics.torch_utils.torch_timer import TimerCUDA
-
-
-def plot_history(i):
-    X = X_hist[i]
-    X = X.view(3 * num_particles_per_goal, -1, 4)
-    # free trajs flag
-    colls = obst_map.get_collisions(X[:, :, :2]).any(dim=1)
-    X = X.cpu().numpy()
-    
-    for j in range(X.shape[0]):
-        if colls[j]:
-            points[j].set_color('black')
-            lines[j].set_color('black')
-        else:
-            points[j].set_color('red')
-            lines[j].set_color('red')
-        points[j].set_data(X[j, :, 0], X[j, :, 1])
-        lines[j].set_data(X[j, :, 0], X[j, :, 1])
-    text.set_text(f'Iters: {i}')
-    return *points, *lines
 
 
 if __name__ == "__main__":
@@ -54,32 +34,33 @@ if __name__ == "__main__":
 
     #--------------------------------- MPOT Tuning Parameters -------------------------------------
     # NOTE: these parameters are tuned for the planar environment
-    step_radius = 0.35
-    probe_radius = 0.5  # probe radius > step radius
+    step_radius = 1.0
+    probe_radius = 1.0  # probe radius >= step radius
 
     # NOTE: changing polytope may require tuning again
-    polytope = 'cube'  # 'random' | 'simplex' | 'orthoplex' | 'cube'; 'random' option is added for ablations, not recommended for general use
+    polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube';
 
-    epsilon = 0.02
+    epsilon = 0.2
+    ent_epsilon = Epsilon(1e-2)
     num_probe = 5  # number of probes points for each polytope vertices
     num_particles_per_goal = 33  # number of plans per goal
     pos_limits = [-10, 10]
     vel_limits = [-10, 10]
     w_coll = 2.4e-3  # for tuning the obstacle cost
     w_smooth = 1e-7  # for tuning the GP cost: error = w_smooth * || Phi x(t) - x(1+1) ||^2
-    sigma_gp = 0.13   # for tuning the GP cost: Q_c = sigma_gp^2 * I
-    sigma_gp_init = 1.5   # for controlling the initial GP variance: Q0_c = sigma_gp_init^2 * I
+    sigma_gp = 0.1   # for tuning the GP cost: Q_c = sigma_gp^2 * I
+    sigma_gp_init = 1.6   # for controlling the initial GP variance: Q0_c = sigma_gp_init^2 * I
     max_inner_iters = 100  # max inner iterations for Sinkhorn-Knopp
     max_outer_iters = 100  # max outer iterations for MPOT
     #--------------------------------- Task Settings ----------------------------------------------
 
-    start_state = torch.tensor([-9, -9], **tensor_args)
+    start_state = torch.tensor([-9, -9, 0., 0.], **tensor_args)
 
-    # NOTE: change goal states here
+    # NOTE: change goal states here (zero vel goals)
     multi_goal_states = torch.tensor([
-        [0, 9],
-        [9, 9],
-        [9, 0]
+        [0, 9, 0., 0.],
+        [9, 9, 0., 0.],
+        [9, 0, 0., 0.]
     ], **tensor_args)
 
     ## Obstacle map
@@ -87,7 +68,6 @@ if __name__ == "__main__":
         map_dim=[20, 20],
         obst_list=[],
         cell_size=0.1,
-        map_type='direct',
         random_gen=True,
         num_obst=15,
         rand_xy_limits=[[-7.5, 7.5], [-7.5, 7.5]],
@@ -98,9 +78,8 @@ if __name__ == "__main__":
     np.random.seed(seed)
     obst_map = generate_obstacle_map(**obst_params)[0]
 
-    #--------------------------------- Cost functions ---------------------------------
+    #--------------------------------- Cost function ---------------------------------
 
-    # Construct cost function
     cost_gp = CostGPHolonomic(dim, traj_len, dt, sigma_gp, [0, 1], weight=w_smooth, tensor_args=tensor_args)
     cost_obst_2D = CostField(dim, [0, traj_len], field=obst_map, weight=w_coll, tensor_args=tensor_args)
     cost_func_list = [cost_obst_2D, cost_gp]
@@ -109,10 +88,10 @@ if __name__ == "__main__":
     #--------------------------------- MPOT Init ---------------------------------
     # Sinkhorn-Knopp parameters
     linear_ot_solver = Sinkhorn(
-        threshold=1e-3,
-        max_iterations=max_inner_iters
+        threshold=1e-6,
+        inner_iterations=1,
+        max_iterations=max_inner_iters,
     )
-    ent_epsilon = Epsilon(0.05)
     ss_params = dict(
         epsilon=epsilon,
         ent_epsilon=ent_epsilon,
@@ -121,12 +100,13 @@ if __name__ == "__main__":
         num_probe=num_probe,
         min_iterations=5,
         max_iterations=max_outer_iters,
-        threshold=2e-4,
+        threshold=8e-5,
         store_history=True,
         tensor_args=tensor_args,
     )
 
     mpot_params = dict(
+        dim=dim,
         objective_fn=objective_fn,
         linear_ot_solver=linear_ot_solver,
         ss_params=ss_params,
@@ -138,6 +118,7 @@ if __name__ == "__main__":
         pos_limits=pos_limits,
         vel_limits=vel_limits,
         polytope=polytope,
+        fixed_goal=True,
         sigma_start_init=0.001,
         sigma_goal_init=0.001,
         sigma_gp_init=sigma_gp_init,
@@ -150,7 +131,8 @@ if __name__ == "__main__":
 
     with TimerCUDA() as t:
         trajs, optim_state, iter = mpot.optimize()
-    colls = obst_map.get_collisions(trajs[..., :2]).any(dim=1)
+    int_trajs = interpolate_trajectory(trajs, num_interpolation=3)
+    colls = obst_map.get_collisions(int_trajs[..., :2]).any(dim=1)
     print(f'Optimization finished at {iter}! Parallelization Quality (GOOD [%]): {(1 - colls.float().mean()) * 100:.2f}')
     print(f'Time(s) optim: {t.elapsed} sec')
     if view_optim:
@@ -167,7 +149,6 @@ if __name__ == "__main__":
         text = ax.text(10, 11, f'Iters {i}', style='italic')
         ax.set_xlim((-10, 10))
         ax.set_ylim((-10, 10))
-        fig.tight_layout()
         ax.axis('off')
         ax.set_aspect('equal')
         cs = ax.contourf(x, y, obst_map.map, 20, cmap='Greys', alpha=1)
@@ -175,6 +156,25 @@ if __name__ == "__main__":
         for i in range(multi_goal_states.shape[0]):
             ax.plot(multi_goal_states[i, 0], multi_goal_states[i, 1], 'go', markersize=5)
         fig.tight_layout()
+
+        def plot_history(i):
+            X = X_hist[i]
+            X = X.view(multi_goal_states.shape[0] * num_particles_per_goal, -1, 4)
+            # free trajs flag
+            colls = obst_map.get_collisions(X[:, :, :2]).any(dim=1)
+            X = X.cpu().numpy()
+            
+            for j in range(X.shape[0]):
+                if colls[j]:
+                    points[j].set_color('black')
+                    lines[j].set_color('black')
+                else:
+                    points[j].set_color('red')
+                    lines[j].set_color('red')
+                points[j].set_data(X[j, :, 0], X[j, :, 1])
+                lines[j].set_data(X[j, :, 0], X[j, :, 1])
+            text.set_text(f'Iters: {i}')
+            return *points, *lines
 
         print('Saving animation..., please wait')
         anim = animation.FuncAnimation(fig, plot_history, frames=len(X_hist), interval=20, blit=True)
@@ -190,7 +190,6 @@ if __name__ == "__main__":
     vel_trajs = trajs[:, :, :, 2:]
     for i in range(trajs.shape[0]):
         for j in range(trajs.shape[1]):
-            # ax.plot(trajs[i, j, :, 0], trajs[i, j, :, 1], 'bo', markersize=3)
             ax.plot(trajs[i, j, :, 0], trajs[i, j, :, 1], 'b-', alpha=0.5, linewidth=0.5)
     # plot goal
     for i in range(multi_goal_states.shape[0]):
