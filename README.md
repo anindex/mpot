@@ -12,7 +12,7 @@ In other words, within multi-modal motion planning scope, `mpot` enables better 
 
 ## Installation
 
-Simply activate your conda/Python environment and run
+Simply activate your conda/Python environment, navigate to `mpot` root directory and run
 
 ```azure
 pip install -e .
