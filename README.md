@@ -1,8 +1,8 @@
 # Accelerating Motion Planning via Optimal Transport
 
 This repository implements Motion Planning via Optimal Transport `mpot` in PyTorch. 
-The philosophy of `mpot` follows Monte Carlo methods' argument, i.e., more samples could discover more better modes with high enough initialization variances.
-In other words, within multi-modal motion planning scope, `mpot` enables better **brute-force** planning with GPU vectorization. This enhances robustness against bad local minima, which is common in optimization-based motion planning.
+The philosophy of `mpot` follows the Monte Carlo methods' argument, i.e., more samples could discover more better modes with high enough initialization variances.
+In other words, within the multi-modal motion planning scope, `mpot` enables better **brute-force** planning with GPU vectorization. This enhances robustness against bad local minima, a common issue in optimization-based motion planning.
 
 <p float="middle">
   <img src="demos/occupancy.gif" width="32%" />
@@ -62,6 +62,10 @@ export 'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512'
 ```
 
 to reduce memory fragmentation.
+
+## Acknowledgement
+
+The Gaussian Process prior implementation is adapted from Sasha Lambert's [`mpc_trajopt`](https://github.com/sashalambert/mpc_trajopt/blob/main/mpc_trajopt/factors/gp_factor.py).
 
 ## Citation
 
