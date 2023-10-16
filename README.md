@@ -10,6 +10,12 @@ In other words, within the multi-modal motion planning scope, `mpot` enables bet
   <img src="demos/panda.gif" width="32%" />
 </p>
 
+## Paper Preprint
+
+This work has been accepted to NeurIPS 2023. Please find the pre-print here:
+
+[<img src="https://img.shields.io/badge/arxiv-%23B31B1B.svg?&style=for-the-badge&logo=arxiv&logoColor=white" />](https://www.ias.informatik.tu-darmstadt.de/uploads/Team/AnThaiLe/mpot_preprint.pdf)
+
 ## Installation
 
 Simply activate your conda/Python environment, navigate to `mpot` root directory and run
