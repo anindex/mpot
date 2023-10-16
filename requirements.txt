@@ -2,3 +2,5 @@ scipy
 numpy
 matplotlib
 torch 
+einops
+torch_robotics @ git+https://github.com/anindex/torch_robotics@main

@@ -148,7 +148,7 @@ class SinkhornState():
         self.errors = errors
         self.fu = fu
         self.gv = gv
-        self.converged = False
+        self.converged_at = -1
 
     def solution_error(
         self,

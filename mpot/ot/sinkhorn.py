@@ -195,7 +195,8 @@ class Sinkhorn:
         while self._continue(state, iteration):
             state = self.one_iteration(ot_prob, state, iteration, compute_error=compute_error)
             iteration += self.inner_iterations
-        state.converged = self._converged(state, iteration)
+        if self._converged(state, iteration):
+            state.converged_at = iteration 
         return state
 
 

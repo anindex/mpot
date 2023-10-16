@@ -70,6 +70,9 @@ class ObstacleRectangle(Obstacle):
             c_x + ceil(w/2.) + obst_map.origin_xi,
             ] += 1
         return obst_map
+    
+    def to_array(self):
+        return np.array([self.center_x, self.center_y, self.width, self.height])
 
 
 class ObstacleCircle(Obstacle):
@@ -103,6 +106,9 @@ class ObstacleCircle(Obstacle):
                 if self.is_inside(p):
                     obst_map.map[i, j] += 1
         return obst_map
+
+    def to_array(self):
+        return np.array([self.center_x, self.center_y, self.radius])
 
 
 class ObstacleMap:
@@ -161,7 +167,7 @@ class ObstacleMap:
         xy_grid = torch.stack((xv, yv), dim=2)
         return xy_grid.to(device)
 
-    def get_collisions(self, X, **kwargs):
+    def get_collisions(self, X, *args, **kwargs):
         """
         Checks for collision in a batch of trajectories using the generated occupancy grid (i.e. obstacle map), and
         returns sum of collision costs for the entire batch.
@@ -181,8 +187,8 @@ class ObstacleMap:
         collision_vals = self.map_torch[X_occ[..., 1], X_occ[..., 0]]
         return collision_vals
 
-    def compute_cost(self, X, **kwargs):
-        return self.get_collisions(X, **kwargs)
+    def compute_cost(self, X, *args, **kwargs):
+        return self.get_collisions(X, *args, **kwargs)
 
     def zero_grad(self):
         pass

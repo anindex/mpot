@@ -25,7 +25,7 @@ class SinkhornStep():
     def __init__(
         self,
         dim: int,
-        objective_fn: Any,
+        objective_fn: Callable,
         linear_ot_solver: Sinkhorn,
         epsilon: Union[Epsilon, float] ,
         ent_epsilon: Union[Epsilon, float] = 0.01,
@@ -85,16 +85,17 @@ class SinkhornStep():
         else:
             costs = None
     
-        self.displacement_sqnorms = -torch.ones(num_iters).type_as(X_init)
-        self.linear_convergence = -torch.ones(num_iters).type_as(X_init)
+        displacement_sqnorms = -torch.ones(num_iters).type_as(X_init)
+        linear_convergence = -torch.ones(num_iters).type_as(X_init)
+
         a = torch.ones((num_points,)).type_as(X_init) / num_points  # always uniform weights for now
 
         return SinkhornStepState(
             X_init=X_init,
             costs=costs,
-            linear_convergence=self.linear_convergence,
+            linear_convergence=linear_convergence,
             X_history=X_history,
-            displacement_sqnorms=self.displacement_sqnorms,
+            displacement_sqnorms=displacement_sqnorms,
             a=a,
         )
 
@@ -108,14 +109,14 @@ class SinkhornStep():
                 scaler(X)
 
         eps = self.epsilon.at(iteration) if isinstance(self.epsilon, Epsilon) else self.epsilon
-        step_radius = self.step_radius * eps
-        probe_radius = self.probe_radius * eps
+        self.step_radius = self.step_radius * (1 - eps)
+        self.probe_radius = self.probe_radius * (1 - eps)
 
         # compute sampled polytope vertices
         X_vertices, X_probe, vertices = get_sampled_polytope_vertices(X,
                                                                       polytope_vertices=self.polytope_vertices,
-                                                                      step_radius=step_radius,
-                                                                      probe_radius=probe_radius,
+                                                                      step_radius=self.step_radius,
+                                                                      probe_radius=self.probe_radius,
                                                                       num_probe=self.num_probe)
         
         # unscale for cost evaluation
@@ -125,8 +126,9 @@ class SinkhornStep():
                 scaler.inverse(X_probe)
 
         # solve Sinkhorn
-        C = self.objective_fn(X_probe, current_trajs=state.X, **kwargs) 
-        ot_prob = LinearProblem(C, epsilon=self.ent_epsilon, a=state.a, scaling_cost=False)
+        optim_dim = X_probe.shape[:-1]
+        C = self.objective_fn(X_probe, current_trajs=state.X, optim_dim=optim_dim, **kwargs)
+        ot_prob = LinearProblem(C, epsilon=self.ent_epsilon, a=state.a, scaling_cost=True)
         W, res = self.linear_ot_solver(ot_prob)
 
         # barycentric projection
@@ -138,7 +140,7 @@ class SinkhornStep():
         if self.store_history:
             state.X_history[iteration] = X_new
 
-        state.linear_convergence[iteration] = res.converged
+        state.linear_convergence[iteration] = res.converged_at
         state.displacement_sqnorms[iteration] = torch.square(X_new - state.X).sum()
         state.X = X_new
         return state
