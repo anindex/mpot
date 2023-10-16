@@ -4,7 +4,7 @@ import numpy as np
 from mpot.ot.sinkhorn_step import SinkhornStep, SinkhornStepState
 from mpot.ot.sinkhorn import Sinkhorn
 from mpot.utils.misc import MinMaxCenterScaler
-from mpot.gp.mp_priors_multi import BatchGPPrior
+from mpot.gp.gp_prior import BatchGPPrior
 from mpot.gp.gp_factor import GPFactor
 from mpot.gp.unary_factor import UnaryFactor
 
@@ -15,7 +15,7 @@ class MPOT(object):
     def __init__(
         self,
         dim: int,
-        objective_fn: Any,
+        objective_fn: Callable,
         linear_ot_solver: Sinkhorn,
         ss_params: dict,
         traj_len: int = 64,
