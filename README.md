@@ -10,6 +10,8 @@ In other words, within the multi-modal motion planning scope, `mpot` enables bet
   <img src="demos/panda.gif" width="32%" />
 </p>
 
+For those interested in standalone Sinkhorn Step as a general-purpose batch gradient-free solver for non-convex optimization problems, please check out [ssax](https://github.com/anindex/ssax).
+
 ## Paper Preprint
 
 This work has been accepted to NeurIPS 2023. Please find the pre-print here:
