@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
-from mpot.ot.problem import Epsilon
+from mpot.ot.problem import EpsilonScheduler
 from mpot.ot.sinkhorn import Sinkhorn
 from mpot.planner import MPOT
 from mpot.costs import CostGPHolonomic, CostField, CostComposite
@@ -36,36 +36,33 @@ if __name__ == "__main__":
     )
 
     robot = RobotPointMass(
-        q_limits=torch.tensor([[-1, -1], [1, 1]], **tensor_args),  # joint limits
+        q_limits=torch.tensor([[-1, -1], [1, 1]], **tensor_args),
         tensor_args=tensor_args
     )
 
     task = PlanningTask(
         env=env,
         robot=robot,
-        ws_limits=torch.tensor([[-0.81, -0.81], [0.95, 0.95]], **tensor_args),  # workspace limits
+        ws_limits=torch.tensor([[-0.81, -0.81], [0.95, 0.95]], **tensor_args),
         obstacle_cutoff_margin=0.005,
         tensor_args=tensor_args
     )
 
     # -------------------------------- Params ---------------------------------
-
-    # NOTE: these parameters are tuned for this environment
     step_radius = 0.15
-    probe_radius = 0.15  # probe radius >= step radius
+    probe_radius = 0.15
+    polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube'
 
-    # NOTE: changing polytope may require tuning again
-    polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube';
+    epsilon_sched = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
+    ent_epsilon_sched = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
 
-    epsilon = 0.01
-    ent_epsilon = Epsilon(1e-2)
-    num_probe = 5  # number of probes points for each polytope vertices
-    num_particles_per_goal = 50  # number of plans per goal  # NOTE: if memory is not enough, reduce this number
+    num_probe = 5
+    num_particles_per_goal = 50
     pos_limits = [-1, 1]
     vel_limits = [-1, 1]
-    w_coll = 7e-2  # for tuning the obstacle cost
+    w_coll = 6e-2  # for tuning the obstacle cost
     w_smooth = 1e-7  # for tuning the GP cost: error = w_smooth * || Phi x(t) - x(1+1) ||^2
-    sigma_gp = 0.03   # for tuning the GP cost: Q_c = sigma_gp^2 * I
+    sigma_gp = 0.04   # for tuning the GP cost: Q_c = sigma_gp^2 * I
     sigma_gp_init = 0.8   # for controlling the initial GP variance: Q0_c = sigma_gp_init^2 * I
     max_inner_iters = 100  # max inner iterations for Sinkhorn-Knopp
     max_outer_iters = 70  # max outer iterations for MPOT
@@ -80,7 +77,6 @@ if __name__ == "__main__":
     dt = 0.04
 
     #--------------------------------- Cost function ---------------------------------
-
     cost_coll = CostField(
         robot, traj_len,
         field=task.df_collision_objects,
@@ -97,28 +93,30 @@ if __name__ == "__main__":
     )
 
     #--------------------------------- MPOT Init ---------------------------------
-
-    linear_ot_solver = Sinkhorn(
-        threshold=1e-4,
+    # Build & JIT the Sinkhorn solver
+    eager_sinkhorn = Sinkhorn(
+        threshold=1e-5,
         inner_iterations=1,
         max_iterations=max_inner_iters,
     )
+    linear_ot_solver = torch.jit.script(eager_sinkhorn)
+
     ss_params = dict(
-        epsilon=epsilon,
-        ent_epsilon=ent_epsilon,
+        epsilon=epsilon_sched,            # scheduler (not float)
+        ent_epsilon=ent_epsilon_sched,    # scheduler (not float)
         step_radius=step_radius,
         probe_radius=probe_radius,
         num_probe=num_probe,
         min_iterations=5,
         max_iterations=max_outer_iters,
-        threshold=1e-3,
+        threshold=5e-5,
         store_history=True,
         tensor_args=tensor_args,
     )
 
     mpot_params = dict(
         objective_fn=cost,
-        linear_ot_solver=linear_ot_solver,
+        linear_ot_solver=linear_ot_solver,   # jitted sinkhorn
         ss_params=ss_params,
         dim=2,
         traj_len=traj_len,
@@ -137,6 +135,9 @@ if __name__ == "__main__":
         tensor_args=tensor_args,
     )
     planner = MPOT(**mpot_params)
+
+    # NOTE: JIT the solver!
+    planner.sinkhorn_step.core = torch.jit.script(planner.sinkhorn_step.core)
 
     # Optimize
     with TimerCUDA() as t:
@@ -168,7 +169,7 @@ if __name__ == "__main__":
     planner_visualizer.animate_opt_iters_robots(
         trajs=pos_trajs_iters, start_state=start_state,
         video_filepath=f'{base_file_name}-traj-opt-iters.mp4',
-        n_frames=max((2, opt_iters// 5)),
+        n_frames=max((2, opt_iters // 5)),
         anim_time=5
     )
 

@@ -72,14 +72,14 @@ class MPOT(object):
             self.pos_limits = torch.tensor(pos_limits, **self.tensor_args)
         if self.pos_limits.ndim == 1:
             self.pos_limits = self.pos_limits.unsqueeze(0).repeat(self.dim, 1)
-        self.pos_scaler = MinMaxCenterScaler(dim_range=[0, self.dim], min=self.pos_limits[:, 0], max=self.pos_limits[:, 1])
+        self.pos_scaler = MinMaxCenterScaler(dim_range=[0, self.dim], min_v=self.pos_limits[:, 0], max_v=self.pos_limits[:, 1])
         if isinstance(vel_limits, torch.Tensor):
             self.vel_limits = vel_limits.clone().to(**self.tensor_args)
         else:
             self.vel_limits = torch.tensor(vel_limits, **self.tensor_args)
         if self.vel_limits.ndim == 1:
             self.vel_limits = self.vel_limits.unsqueeze(0).repeat(self.dim, 1)
-        self.vel_scaler = MinMaxCenterScaler(dim_range=[self.dim, self.state_dim], min=self.vel_limits[:, 0], max=self.vel_limits[:, 1])
+        self.vel_scaler = MinMaxCenterScaler(dim_range=[self.dim, self.state_dim], min_v=self.vel_limits[:, 0], max_v=self.vel_limits[:, 1])
 
         # init solver
         self.ss_params = ss_params

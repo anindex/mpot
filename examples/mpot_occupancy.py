@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
-from mpot.ot.problem import Epsilon
+from mpot.ot.problem import EpsilonScheduler
 from mpot.ot.sinkhorn import Sinkhorn
 from mpot.planner import MPOT
 from mpot.costs import CostGPHolonomic, CostField, CostComposite
@@ -57,8 +57,10 @@ if __name__ == "__main__":
     # NOTE: changing polytope may require tuning again
     polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube';
 
-    epsilon = 0.01
-    ent_epsilon = Epsilon(1e-2)
+    # Use schedulers for both epsilons (JIT-safe APIs expect schedulers)
+    epsilon_sched = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
+    ent_epsilon = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
+
     num_probe = 5  # number of probes points for each polytope vertices
     num_particles_per_goal = 33  # number of plans per goal
     pos_limits = [-10, 10]
@@ -83,7 +85,6 @@ if __name__ == "__main__":
     dt = 0.1
 
     #--------------------------------- Cost function ---------------------------------
-    
     cost_coll = CostField(
         robot, traj_len,
         field=env.occupancy_map,
@@ -101,13 +102,15 @@ if __name__ == "__main__":
 
     #--------------------------------- MPOT Init ---------------------------------
 
-    linear_ot_solver = Sinkhorn(
+    eager_sinkhorn = Sinkhorn(
         threshold=1e-6,
         inner_iterations=1,
         max_iterations=max_inner_iters,
     )
+    linear_ot_solver = torch.jit.script(eager_sinkhorn)
+
     ss_params = dict(
-        epsilon=epsilon,
+        epsilon=epsilon_sched,      # <-- changed from float to scheduler
         ent_epsilon=ent_epsilon,
         step_radius=step_radius,
         probe_radius=probe_radius,
@@ -140,6 +143,9 @@ if __name__ == "__main__":
         tensor_args=tensor_args,
     )
     planner = MPOT(**mpot_params)
+
+    # NOTE: JIT the solver!
+    planner.sinkhorn_step.core = torch.jit.script(planner.sinkhorn_step.core)
 
     #--------------------------------- Optimize ---------------------------------
 
