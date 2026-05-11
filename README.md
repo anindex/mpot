@@ -1,7 +1,10 @@
 # Accelerating Motion Planning via Optimal Transport
 
-[![arXiv](https://img.shields.io/badge/arXiv-2309.15970-B31B1B.svg?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2309.15970)
-[![NeurIPS 2023](https://img.shields.io/badge/NeurIPS-2023-blue.svg?style=for-the-badge)](https://neurips.cc/virtual/2023/poster/71792)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
+[![arXiv](https://img.shields.io/badge/arXiv-2309.15970-B31B1B.svg)](https://arxiv.org/abs/2309.15970)
+[![NeurIPS 2023](https://img.shields.io/badge/NeurIPS-2023-blue.svg)](https://neurips.cc/virtual/2023/poster/71792)
 
 This repository implements Motion Planning via Optimal Transport (`mpot`) in PyTorch.
 The philosophy of `mpot` follows the Monte Carlo methods' argument: more samples discover more and better modes with high enough initialization variances.
@@ -99,10 +102,12 @@ The Gaussian Process prior implementation is adapted from Sasha Lambert's [`mpc_
 If you found this repository useful, please consider citing:
 
 ```bibtex
-@inproceedings{le2023accelerating,
-  title={Accelerating Motion Planning via Optimal Transport},
-  author={Le, An T. and Chalvatzaki, Georgia and Biess, Armin and Peters, Jan},
-  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
+@article{le2023accelerating,
+  title={Accelerating motion planning via optimal transport},
+  author={Le, An T and Chalvatzaki, Georgia and Biess, Armin and Peters, Jan R},
+  journal={Advances in Neural Information Processing Systems},
+  volume={36},
+  pages={78453--78482},
   year={2023}
 }
 ```
