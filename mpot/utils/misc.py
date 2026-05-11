@@ -1,13 +1,9 @@
 import torch
 from typing import Optional, List
 
-# --------------------------
-# Min-Max Scaler (learnable)
-# --------------------------
-@torch.jit.script
+
 class MinMaxScaler:
-    min_t: Optional[torch.Tensor]
-    max_t: Optional[torch.Tensor]
+    """Min-max normalization to [0, 1]."""
 
     def __init__(self, min_t: Optional[torch.Tensor] = None, max_t: Optional[torch.Tensor] = None):
         self.min_t = min_t
@@ -18,98 +14,60 @@ class MinMaxScaler:
             self.min_t = torch.min(X)
         if self.max_t is None:
             self.max_t = torch.max(X)
-        min_val = self.min_t
-        max_val = self.max_t
-        assert min_val is not None
-        assert max_val is not None
-        return (X - min_val) / (max_val - min_val)
+        return (X - self.min_t) / (self.max_t - self.min_t)
 
     def inverse(self, X: torch.Tensor) -> torch.Tensor:
-        min_val = self.min_t
-        max_val = self.max_t
-        assert min_val is not None
-        assert max_val is not None
-        return X * (max_val - min_val) + min_val
+        assert self.min_t is not None and self.max_t is not None
+        return X * (self.max_t - self.min_t) + self.min_t
 
 
-# ----------------------------------
-# Min-Max Center Scaler to [-1, 1]
-# Accepts tensor min_v/max_v (0-D or 1-D matching slice length)
-# In-place over a slice of dimensions
-# ----------------------------------
-@torch.jit.script
 class MinMaxCenterScaler:
-    dim_range: List[int]
-    dim: int
-    min_v: torch.Tensor
-    max_v: torch.Tensor
+    """In-place min-max normalization to [-1, 1] over a slice of dimensions."""
 
     def __init__(self, dim_range: List[int], min_v: torch.Tensor, max_v: torch.Tensor):
         self.dim_range = dim_range
-        self.dim = int(dim_range[1] - dim_range[0])
+        self.dim = dim_range[1] - dim_range[0]
         self.min_v = min_v
         self.max_v = max_v
 
     def __call__(self, X: torch.Tensor) -> None:
-        s = int(self.dim_range[0])
-        e = int(self.dim_range[1])
-        # Broadcast works for min_v/max_v shapes: () or (dim,)
-        denom = (self.max_v - self.min_v)
+        s, e = self.dim_range[0], self.dim_range[1]
+        denom = self.max_v - self.min_v
         X[..., s:e] = 2.0 * (X[..., s:e] - self.min_v) / denom - 1.0
 
     def inverse(self, X: torch.Tensor) -> None:
-        s = int(self.dim_range[0])
-        e = int(self.dim_range[1])
-        denom = (self.max_v - self.min_v)
+        s, e = self.dim_range[0], self.dim_range[1]
+        denom = self.max_v - self.min_v
         X[..., s:e] = (X[..., s:e] + 1.0) * denom / 2.0 + self.min_v
 
 
-# ------------------------------
-# Min-Max-Mean Scaler (in-place)
-# mean is learned from data slice
-# Accepts tensor min_v/max_v
-# ------------------------------
-@torch.jit.script
 class MinMaxMeanScaler:
-    dim_range: List[int]
-    dim: int
-    min_v: torch.Tensor
-    max_v: torch.Tensor
-    mean_t: Optional[torch.Tensor]
+    """In-place min-max-mean normalization over a slice of dimensions."""
 
-    def __init__(self, dim_range: List[int], min_v: torch.Tensor, max_v: torch.Tensor, mean_t: Optional[torch.Tensor] = None):
+    def __init__(self, dim_range: List[int], min_v: torch.Tensor, max_v: torch.Tensor,
+                 mean_t: Optional[torch.Tensor] = None):
         self.dim_range = dim_range
-        self.dim = int(dim_range[1] - dim_range[0])
+        self.dim = dim_range[1] - dim_range[0]
         self.min_v = min_v
         self.max_v = max_v
         self.mean_t = mean_t
 
     def __call__(self, X: torch.Tensor) -> None:
-        s = int(self.dim_range[0])
-        e = int(self.dim_range[1])
+        s, e = self.dim_range[0], self.dim_range[1]
         if self.mean_t is None:
             self.mean_t = X[..., s:e].reshape(-1, self.dim).mean(0)
-        mean_val = self.mean_t
-        assert mean_val is not None
-        denom = (self.max_v - self.min_v)
-        X[..., s:e] = (X[..., s:e] - mean_val) / denom
+        denom = self.max_v - self.min_v
+        X[..., s:e] = (X[..., s:e] - self.mean_t) / denom
 
     def inverse(self, X: torch.Tensor) -> None:
-        s = int(self.dim_range[0])
-        e = int(self.dim_range[1])
-        mean_val = self.mean_t
-        assert mean_val is not None
-        denom = (self.max_v - self.min_v)
-        X[..., s:e] = X[..., s:e] * denom + mean_val
+        s, e = self.dim_range[0], self.dim_range[1]
+        assert self.mean_t is not None
+        denom = self.max_v - self.min_v
+        X[..., s:e] = X[..., s:e] * denom + self.mean_t
 
 
-# -------------------
-# Standard Scaler
-# -------------------
-@torch.jit.script
 class StandardScaler:
-    mean: torch.Tensor
-    std: torch.Tensor
+    """Standard (z-score) normalization."""
 
     def __init__(self, mean: torch.Tensor, std: torch.Tensor):
         self.mean = mean

@@ -1,32 +1,30 @@
 from typing import List
 import torch
 
-# =============== Scriptable helpers (no LinearProblem types) ===============
 
-@torch.jit.script
 def scale_cost_matrix(M: torch.Tensor) -> torch.Tensor:
     mn = torch.min(M)
-    if bool(mn < 0):
+    if mn < 0:
         M = M - mn
     mx = torch.max(M)
-    if bool(mx > 1.0):
+    if mx > 1.0:
         M = M / mx
     return M
 
-@torch.jit.script
+
 def rho(epsilon: float, tau: float) -> float:
     return (epsilon * tau) / (1.0 - tau)
 
-@torch.jit.script
+
 def phi_star(h: torch.Tensor, rho_val: float) -> torch.Tensor:
     # Legendre transform of KL
-    return torch.tensor(rho_val, dtype=h.dtype, device=h.device) * (torch.exp(h / rho_val) - 1.0)
+    return rho_val * (torch.exp(h / rho_val) - 1.0)
 
-@torch.jit.script
+
 def derivative_phi_star(f: torch.Tensor, rho_val: float) -> torch.Tensor:
     return torch.exp(f / rho_val)
 
-@torch.jit.script
+
 def grad_of_marginal_fit(c: torch.Tensor, h: torch.Tensor, tau: float, epsilon: float) -> torch.Tensor:
     if tau == 1.0:
         return c
@@ -34,16 +32,12 @@ def grad_of_marginal_fit(c: torch.Tensor, h: torch.Tensor, tau: float, epsilon: 
     return torch.where(c > 0, c * derivative_phi_star(-h, r), torch.zeros_like(c))
 
 
-# =========================== Scripted classes ==============================
+def _finite_or_zero(x: torch.Tensor) -> torch.Tensor:
+    return torch.where(torch.isfinite(x), x, torch.zeros_like(x))
 
-@torch.jit.script
+
 class EpsilonScheduler:
-    # mode 0: multiplicative; mode 1: linear
-    target_init: float
-    scale_epsilon: float
-    init: float
-    decay: float
-    mode: int
+    """Epsilon annealing schedule for Sinkhorn regularization."""
 
     def __init__(self, target: float = 0.1, scale_epsilon: float = 1.0,
                  init: float = 1.0, decay: float = 1.0, mode: int = 0):
@@ -51,7 +45,7 @@ class EpsilonScheduler:
         self.scale_epsilon = float(scale_epsilon)
         self.init = float(init)
         self.decay = float(decay)
-        self.mode = int(mode)
+        self.mode = int(mode)  # 0: multiplicative, 1: linear
 
     def target(self) -> float:
         return self.scale_epsilon * self.target_init
@@ -79,14 +73,8 @@ class EpsilonScheduler:
         return self.done(self.at(iteration))
 
 
-@torch.jit.script
 class LinearProblem:
-    C: torch.Tensor
-    epsilon: EpsilonScheduler
-    a: torch.Tensor
-    b: torch.Tensor
-    tau_a: float
-    tau_b: float
+    """Entropic optimal transport problem with cost matrix C."""
 
     def __init__(self, C: torch.Tensor, epsilon: EpsilonScheduler,
                  a: torch.Tensor, b: torch.Tensor,
@@ -103,8 +91,6 @@ class LinearProblem:
         self.tau_a = float(tau_a)
         self.tau_b = float(tau_b)
 
-    # ---- kernels / utilities ----
-
     def potential_from_scaling(self, scaling: torch.Tensor) -> torch.Tensor:
         eps = self.epsilon.target()
         return eps * torch.log(scaling)
@@ -119,7 +105,7 @@ class LinearProblem:
     def apply_lse_kernel(self, f: torch.Tensor, g: torch.Tensor, eps: float, dim: int) -> torch.Tensor:
         w_res = self._softmax(f, g, eps, dim)
         remove = f if dim == 1 else g
-        return w_res - torch.where(torch.isfinite(remove), remove, torch.zeros_like(remove))
+        return w_res - _finite_or_zero(remove)
 
     def marginal_from_potentials(self, f: torch.Tensor, g: torch.Tensor, dim: int) -> torch.Tensor:
         eps = self.epsilon.target()
@@ -131,13 +117,11 @@ class LinearProblem:
                          iteration: int, dim: int) -> torch.Tensor:
         eps = self.epsilon.at(iteration)
         app_lse = self.apply_lse_kernel(f, g, eps, dim)
-        return eps * log_marginal - torch.where(torch.isfinite(app_lse), app_lse, torch.zeros_like(app_lse))
+        return eps * log_marginal - _finite_or_zero(app_lse)
 
     def transport_from_potentials(self, f: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         eps = self.epsilon.target()
         return torch.exp(self._center(f, g) / eps)
-
-    # ---- moved former free functions to methods (no forward refs) ----
 
     def marginal_error(self, f_u: torch.Tensor, g_v: torch.Tensor,
                        target: torch.Tensor, dim: int) -> torch.Tensor:
@@ -183,12 +167,8 @@ class LinearProblem:
         return div_a + div_b + eps_t * (torch.sum(self.a) * torch.sum(self.b) - total_sum)
 
 
-@torch.jit.script
 class SinkhornState:
-    errors: torch.Tensor
-    fu: torch.Tensor
-    gv: torch.Tensor
-    converged_at: int
+    """Dual potentials and convergence state for Sinkhorn iterations."""
 
     def __init__(self, errors: torch.Tensor, fu: torch.Tensor, gv: torch.Tensor):
         self.errors = errors
@@ -203,24 +183,16 @@ class SinkhornState:
         return ot_prob.ent_reg_cost(self.fu, self.gv)
 
 
-@torch.jit.script
 class SinkhornStepState:
-    X: torch.Tensor
-    costs: torch.Tensor
-    linear_convergence: torch.Tensor
-    objective_vals: torch.Tensor
-    X_history: torch.Tensor
-    displacement_sqnorms: torch.Tensor
-    a: torch.Tensor
+    """State for the outer Sinkhorn Step optimization loop."""
 
     def __init__(self, X_init: torch.Tensor, costs: torch.Tensor,
-                 linear_convergence: torch.Tensor, # objective_vals: torch.Tensor,
+                 linear_convergence: torch.Tensor,
                  X_history: torch.Tensor, displacement_sqnorms: torch.Tensor,
                  a: torch.Tensor):
         self.X = X_init
         self.costs = costs
         self.linear_convergence = linear_convergence
-        # self.objective_vals = objective_vals
         self.X_history = X_history
         self.displacement_sqnorms = displacement_sqnorms
         self.a = a

@@ -1,39 +1,22 @@
 import torch
 from typing import Tuple
 
-from mpot.ot.problem import LinearProblem, SinkhornState
+from mpot.ot.problem import LinearProblem, SinkhornState, _finite_or_zero
 
-# -------------------------
-# TorchScript-friendly utils
-# -------------------------
 
-@torch.jit.script
 def _outer_iterations(max_iterations: int, inner_iterations: int) -> int:
-    # ceil(max_it / inner_it) without numpy
     return (max_iterations + inner_iterations - 1) // inner_iterations
 
-@torch.jit.script
+
 def _coerce_dual(v: torch.Tensor, target_len: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     v = v.reshape(-1)
-    if int(v.numel()) != int(target_len):
+    if v.numel() != target_len:
         return torch.zeros((target_len,), dtype=dtype, device=device)
     return v
 
-@torch.jit.script
-def _finite_or_zero(x: torch.Tensor) -> torch.Tensor:
-    return torch.where(torch.isfinite(x), x, torch.zeros_like(x))
 
-
-# -------------------------
-# Momentum (scripted)
-# -------------------------
-
-@torch.jit.script
 class Momentum:
-    start: int
-    error_threshold: float
-    value: float
-    inner_iterations: int
+    """Lehmann-style momentum for Sinkhorn dual updates."""
 
     def __init__(self, start: int = 0, error_threshold: float = 1.0e38,
                  value: float = 1.0, inner_iterations: int = 1):
@@ -46,8 +29,7 @@ class Momentum:
         if self.start == 0:
             return self.value
         idx = self.start // self.inner_iterations
-        # require at least one completed error slot
-        if iteration >= self.start and int(state.errors.numel()) >= idx:
+        if iteration >= self.start and state.errors.numel() >= idx:
             prev_err = state.errors[idx - 1]
             if prev_err < self.error_threshold:
                 return float(self.lehmann(state))
@@ -56,7 +38,6 @@ class Momentum:
     def lehmann(self, state: SinkhornState) -> float:
         # See: Lehmann et al. (2021), eq. (5)
         idx = self.start // self.inner_iterations
-        # need two past errors: idx-1 and idx-2
         if idx < 2:
             return self.value
         e1 = state.errors[idx - 1]
@@ -76,19 +57,8 @@ class Momentum:
         return (1.0 - w) * v + w * new_value
 
 
-# -------------------------
-# Sinkhorn (scripted)
-# -------------------------
-
-@torch.jit.script
 class Sinkhorn:
-    threshold: float
-    inner_iterations: int
-    min_iterations: int
-    max_iterations: int
-    parallel_dual_updates: bool
-    init_type: int
-    momentum: Momentum
+    """Sinkhorn-Knopp algorithm for entropic optimal transport."""
 
     def __init__(self,
                  threshold: float = 1e-3,
@@ -96,22 +66,19 @@ class Sinkhorn:
                  min_iterations: int = 1,
                  max_iterations: int = 100,
                  parallel_dual_updates: bool = False,
-                 init_type: int = 0   # 0: default zeros, 1: random small noise
-                 ):
+                 init_type: int = 0):
         self.threshold = float(threshold)
         self.inner_iterations = int(inner_iterations)
         self.min_iterations = int(min_iterations)
         self.max_iterations = int(max_iterations)
         self.parallel_dual_updates = bool(parallel_dual_updates)
-        self.init_type = int(init_type)
+        self.init_type = int(init_type)  # 0: zeros, 1: random small noise
         self.momentum = Momentum(0, 1.0e38, 1.0, self.inner_iterations)
 
-    # ---- initializer (scripted, no external deps) ----
     def _init_duals(self, ot_prob: LinearProblem,
                     fu0: torch.Tensor, gv0: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        n = int(ot_prob.a.shape[0])
-        m = int(ot_prob.b.shape[0])
+        n = ot_prob.a.shape[0]
+        m = ot_prob.b.shape[0]
         dtype = ot_prob.C.dtype
         device = ot_prob.C.device
 
@@ -119,13 +86,11 @@ class Sinkhorn:
         gv = _coerce_dual(gv0, m, dtype, device)
 
         if self.init_type == 1:
-            # random small init around zero (log-space compatible)
             fu = fu + 1e-3 * torch.randn_like(fu)
             gv = gv + 1e-3 * torch.randn_like(gv)
 
         return fu, gv
 
-    # ---- single LSE step ----
     def lse_step(self, ot_prob: LinearProblem, state: SinkhornState, iteration: int) -> SinkhornState:
         w = self.momentum.weight(state, iteration)
         tau_a = ot_prob.tau_a
@@ -134,14 +99,11 @@ class Sinkhorn:
         old_fu = state.fu
         old_gv = state.gv
 
-        # update g (dim=0)
         new_gv = tau_b * ot_prob.update_potential(old_fu, old_gv, torch.log(ot_prob.b), iteration, 0)
         gv = self.momentum.apply(w, old_gv, new_gv)
 
-        # if not parallel, f update uses the freshly updated g
         g_for_f = gv if (not self.parallel_dual_updates) else old_gv
 
-        # update f (dim=1)
         new_fu = tau_a * ot_prob.update_potential(old_fu, g_for_f, torch.log(ot_prob.a), iteration, 1)
         fu = self.momentum.apply(w, old_fu, new_fu)
 
@@ -149,13 +111,10 @@ class Sinkhorn:
         state.gv = gv
         return state
 
-    # ---- one outer iteration (may contain several inner steps in your design) ----
     def one_iteration(self, ot_prob: LinearProblem, state: SinkhornState,
                       iteration: int, compute_error: bool) -> SinkhornState:
-
         state = self.lse_step(ot_prob, state, iteration)
 
-        # re-compute error if requested
         if compute_error:
             err = state.solution_error(ot_prob, self.parallel_dual_updates)
         else:
@@ -165,7 +124,6 @@ class Sinkhorn:
         state.errors[idx] = err
         return state
 
-    # ---- stopping logic ----
     def _converged(self, state: SinkhornState, iteration: int) -> bool:
         if iteration <= self.min_iterations:
             return False
@@ -184,7 +142,6 @@ class Sinkhorn:
         oit = _outer_iterations(self.max_iterations, self.inner_iterations)
         return (iteration < oit) and (not self._converged(state, iteration)) and (not self._diverged(state, iteration))
 
-    # ---- state init / output ----
     def init_state(self, ot_prob: LinearProblem, fu: torch.Tensor, gv: torch.Tensor) -> SinkhornState:
         oit = _outer_iterations(self.max_iterations, self.inner_iterations)
         errors = -torch.ones((oit,), dtype=ot_prob.C.dtype, device=ot_prob.C.device)
@@ -193,7 +150,6 @@ class Sinkhorn:
     def output_from_state(self, ot_prob: LinearProblem, state: SinkhornState) -> torch.Tensor:
         return ot_prob.transport_from_potentials(state.fu, state.gv)
 
-    # ---- main loop ----
     def iterations(self, ot_prob: LinearProblem, fu0: torch.Tensor, gv0: torch.Tensor,
                    compute_error: bool) -> SinkhornState:
         fu, gv = self._init_duals(ot_prob, fu0, gv0)
@@ -209,9 +165,7 @@ class Sinkhorn:
 
         return state
 
-    # ---- callable interface (avoids Optional/Union defaults) ----
     def run(self, ot_prob: LinearProblem, fu0: torch.Tensor, gv0: torch.Tensor,
             compute_error: bool = True) -> Tuple[torch.Tensor, SinkhornState]:
-
         final_state = self.iterations(ot_prob, fu0, gv0, compute_error)
         return self.output_from_state(ot_prob, final_state), final_state

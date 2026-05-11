@@ -29,18 +29,19 @@ class Cost(ABC):
         assert trajs.ndim == 3 or trajs.ndim == 4
         N = 1
         if trajs.ndim == 4:
-            N, B, H, D = trajs.shape  # n_goals (or steps), batch of trajectories, length, dim
+            N, B, H, D = trajs.shape
             trajs = einops.rearrange(trajs, 'N B H D -> (N B) H D')
         else:
             B, H, D = trajs.shape
 
         q_pos = self.robot.get_position(trajs)
         q_vel = self.robot.get_velocity(trajs)
-        H_positions = self.robot.fk_map_collision(q_pos)  # I, taskspaces, x_dim+1, x_dim+1 (homogeneous transformation matrices)
+        H_positions = self.robot.fk_map_collision(q_pos)
         return trajs, q_pos, q_vel, H_positions
 
 
 class CostField(Cost):
+    """Obstacle field cost for trajectory optimization."""
 
     def __init__(
         self,
@@ -55,9 +56,8 @@ class CostField(Cost):
         self.sigma = sigma
 
         self.set_cost_factors()
-    
+
     def set_cost_factors(self):
-        # ========= Cost factors ===============
         self.obst_factor = FieldFactor(
             self.n_dof,
             self.sigma,
@@ -67,24 +67,20 @@ class CostField(Cost):
     def cost(self, trajs: torch.Tensor, **observation) -> torch.Tensor:
         traj_dim = observation.get('traj_dim', None)
         if self.field is None:
-            return 0
-        trajs = trajs.view(traj_dim)  # [..., traj_len, dim]
+            return torch.zeros(trajs.shape[0], **self.tensor_args)
+        trajs = trajs.view(traj_dim)
         states = trajs[..., :self.n_dof]
         field_cost = self.field.compute_cost(states, **observation)
-        return field_cost.view(traj_dim[:-1]).mean(-1)  # mean the traj_len
+        return field_cost.view(traj_dim[:-1]).mean(-1)
 
     def eval(self, trajs: torch.Tensor, q_pos=None, q_vel=None, H_positions=None, **observation):
         optim_dim = observation.get('optim_dim')
         costs = 0
         if self.field is not None:
-            # H_pos = link_pos_from_link_tensor(H)  # get translation part from transformation matrices
             H_pos = H_positions
             err_obst = self.obst_factor.get_error(
-                trajs,
-                self.field,
-                q_pos=q_pos,
-                q_vel=q_vel,
-                H_pos=H_pos,
+                trajs, self.field,
+                q_pos=q_pos, q_vel=q_vel, H_pos=H_pos,
                 calc_jacobian=False
             )
             w_mat = self.obst_factor.K
@@ -95,6 +91,7 @@ class CostField(Cost):
 
 
 class CostGPHolonomic(Cost):
+    """GP smoothness cost for holonomic trajectory optimization."""
 
     def __init__(
         self,
@@ -123,7 +120,7 @@ class CostGPHolonomic(Cost):
         phi_u = torch.cat((I, self.dt * I), dim=1)
         phi_l = torch.cat((Z, I), dim=1)
         phi = torch.cat((phi_u, phi_l), dim=0)
-        return phi  # [dim, dim]
+        return phi
 
     def calc_Q_inv(self) -> torch.Tensor:
         m1 = 12. * (self.dt ** -3.) * self.Q_c_inv
@@ -132,45 +129,46 @@ class CostGPHolonomic(Cost):
 
         Q_inv_u = torch.cat((m1, m2), dim=-1)
         Q_inv_l = torch.cat((m2, m3), dim=-1)
-        Q_inv  = torch.cat((Q_inv_u, Q_inv_l), dim=-2)
+        Q_inv = torch.cat((Q_inv_u, Q_inv_l), dim=-2)
         return Q_inv
 
     def cost(self, trajs: torch.Tensor, **observation) -> torch.Tensor:
         traj_dim = observation.get('traj_dim', None)
-        trajs = trajs.view(traj_dim)  # [..., n_support_points, dim]
-        errors = (trajs[..., 1:, :] - trajs[..., :-1, :] @ self.phi_T)  # [..., n_support_points-1, dim * 2]
-        costs = torch.einsum('...ij,...ijk,...ik->...i', errors, self.single_Q_inv, errors)  # [..., n_support_points-1]
-        return costs.mean(dim=-1)  # mean the n_support_points
+        trajs = trajs.view(traj_dim)
+        errors = (trajs[..., 1:, :] - trajs[..., :-1, :] @ self.phi_T)
+        costs = torch.einsum('...ij,...ijk,...ik->...i', errors, self.single_Q_inv, errors)
+        return costs.mean(dim=-1)
 
     def eval(self, trajs: torch.Tensor, **observation) -> torch.Tensor:
         traj_dim = observation.get('traj_dim')
         optim_dim = observation.get('optim_dim')
 
         current_trajs = observation.get('current_trajs')
-        current_trajs = current_trajs.view(traj_dim)  # [..., n_support_points, dim]
-        current_trajs = current_trajs.unsqueeze(-2).unsqueeze(-2)  # [..., n_support_points, 1, 1, dim]
+        current_trajs = current_trajs.view(traj_dim)
+        current_trajs = current_trajs.unsqueeze(-2).unsqueeze(-2)
 
-        cost_dim = traj_dim[:-1] + optim_dim[1:3]  # [..., n_support_points] + [nb2, num_probe]
+        cost_dim = traj_dim[:-1] + optim_dim[1:3]
         costs = torch.zeros(cost_dim, **self.tensor_args)
         states = trajs
 
-        probe_points = states[..., self.probe_range[0]:self.probe_range[1], :]  # [..., nb2, num_eval, dim * 2]
+        probe_points = states[..., self.probe_range[0]:self.probe_range[1], :]
         len_probe = probe_points.shape[-2]
-        probe_points = probe_points.view(traj_dim[:-1] + (optim_dim[1], len_probe, self.dim,))  # [..., n_support_points] + [nb2, num_eval, dim * 2]
-        right_errors = probe_points[..., 1:self.n_support_points, :, :, :] - current_trajs[..., 0:self.n_support_points-1, :, :, :] @ self.phi_T # [..., n_support_points-1, nb2, num_eval, dim * 2]
-        left_errors = current_trajs[..., 1:self.n_support_points, :, :, :] - probe_points[..., 0:self.n_support_points-1, :, :, :] @ self.phi_T # [..., n_support_points-1, nb2, num_eval, dim * 2]
-        # mahalanobis distance
-        left_cost_dist = torch.einsum('...ij,...ijk,...ik->...i', left_errors, self.single_Q_inv, left_errors)  # [..., n_support_points-1, nb2, num_eval]
-        right_cost_dist = torch.einsum('...ij,...ijk,...ik->...i', right_errors, self.single_Q_inv, right_errors)  # [..., n_support_points-1, nb2, num_eval]
+        probe_points = probe_points.view(traj_dim[:-1] + (optim_dim[1], len_probe, self.dim,))
+        right_errors = probe_points[..., 1:self.n_support_points, :, :, :] - current_trajs[..., 0:self.n_support_points-1, :, :, :] @ self.phi_T
+        left_errors = current_trajs[..., 1:self.n_support_points, :, :, :] - probe_points[..., 0:self.n_support_points-1, :, :, :] @ self.phi_T
+        # Mahalanobis distance
+        left_cost_dist = torch.einsum('...ij,...ijk,...ik->...i', left_errors, self.single_Q_inv, left_errors)
+        right_cost_dist = torch.einsum('...ij,...ijk,...ik->...i', right_errors, self.single_Q_inv, right_errors)
 
         costs[..., 0:self.n_support_points-1, :, self.probe_range[0]:self.probe_range[1]] += left_cost_dist
         costs[..., 1:self.n_support_points, :, self.probe_range[0]:self.probe_range[1]] += right_cost_dist
-        costs = costs.view(optim_dim).mean(dim=-1)  # mean the probe
+        costs = costs.view(optim_dim).mean(dim=-1)
 
         return costs
 
 
 class CostComposite(Cost):
+    """Composite cost that combines multiple cost functions with weights."""
 
     def __init__(
         self,
@@ -184,10 +182,10 @@ class CostComposite(Cost):
         self.cost_l = cost_list
         self.weight_cost_l = weights_cost_l if weights_cost_l is not None else [1.0] * len(cost_list)
 
-    def eval(self, trajs, trajs_interpolated=None, return_invidual_costs_and_weights=False, **kwargs):
+    def eval(self, trajs, trajs_interpolated=None, return_individual_costs_and_weights=False, **kwargs):
         trajs, q_pos, q_vel, H_positions = self.get_q_pos_vel_and_fk_map(trajs)
 
-        if not return_invidual_costs_and_weights:
+        if not return_individual_costs_and_weights:
             cost_total = 0
             for cost, weight_cost in zip(self.cost_l, self.weight_cost_l):
                 if trajs_interpolated is not None:
@@ -201,14 +199,9 @@ class CostComposite(Cost):
             cost_l = []
             for cost in self.cost_l:
                 if trajs_interpolated is not None:
-                    # Compute only collision costs with interpolated trajectories.
-                    # Other costs are computed with non-interpolated trajectories, e.g. smoothness
                     trajs_tmp = trajs_interpolated
                 else:
                     trajs_tmp = trajs
-
                 cost_tmp = cost(trajs_tmp, q_pos=q_pos, q_vel=q_vel, H_positions=H_positions, **kwargs)
                 cost_l.append(cost_tmp)
-
-            if return_invidual_costs_and_weights:
-                return cost_l, self.weight_cost_l
+            return cost_l, self.weight_cost_l

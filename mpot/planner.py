@@ -10,7 +10,11 @@ from mpot.gp.unary_factor import UnaryFactor
 
 
 class MPOT(object):
-    """Batch First-order Trajectory Optimization with Sinkhorn Step."""
+    """Batch Trajectory Optimization with Sinkhorn Step.
+
+    Implements Motion Planning via Optimal Transport (MPOT) for multi-modal,
+    gradient-free trajectory optimization using entropic optimal transport.
+    """
 
     def __init__(
         self,
@@ -44,12 +48,12 @@ class MPOT(object):
         if tensor_args is None:
             tensor_args = {'device': torch.device('cpu'), 'dtype': torch.float32}
         self.tensor_args = tensor_args
-        np.random.seed(seed)
+        self._rng = np.random.default_rng(seed)
         torch.manual_seed(seed)
 
         self.start_state = start_state
         self.multi_goal_states = multi_goal_states
-        if multi_goal_states is None:  # NOTE: if there is no goal, we assume here is at least one goal
+        if multi_goal_states is None:
             self.num_goals = 1
         else:
             assert multi_goal_states.ndim == 2
@@ -99,11 +103,14 @@ class MPOT(object):
     ):
         if start_state is not None:
             self.start_state = start_state.detach().clone()
+        assert self.start_state is not None, "start_state must be provided"
         assert self.start_state.shape[-1] == self.state_dim, "start_state dimension should be dim * 2"
 
         if multi_goal_states is not None:
             self.multi_goal_states = multi_goal_states.detach().clone()
-        assert self.multi_goal_states.shape[-1] == self.state_dim, "multi_goal_states dimension should be dim * 2"
+        # multi_goal_states can be None for goal-free planning
+        if self.multi_goal_states is not None:
+            assert self.multi_goal_states.shape[-1] == self.state_dim, "multi_goal_states dimension should be dim * 2"
 
         self.get_prior_dists(initial_particle_means=initial_particle_means)
 
@@ -140,15 +147,15 @@ class MPOT(object):
         )
 
     def get_random_trajs(self) -> torch.Tensor:
-        # force torch.float64
+        # force torch.float64 for numerical stability in GP prior
         tensor_args = dict(dtype=torch.float64, device=self.tensor_args['device'])
-        # set zero velocity for GP prior
         start_state = self.start_state.to(**tensor_args)
         if self.multi_goal_states is not None:
             multi_goal_states = self.multi_goal_states.to(**tensor_args)
         else:
             multi_goal_states = None
-        #========= Initialization factors ===============
+
+        # Initialization factors
         self.start_prior_init = UnaryFactor(
             self.dim * 2,
             self.sigma_start_init,
@@ -175,29 +182,40 @@ class MPOT(object):
                         tensor_args=tensor_args,
                     )
                 )
+
+        goal_K = self.multi_goal_prior_init[0].K if multi_goal_states is not None else None
+        goal_pos = multi_goal_states[..., :self.dim] if multi_goal_states is not None else None
+
         self._traj_dist = self.get_GP_prior(
-                self.start_prior_init.K,
-                self.gp_prior_init.Q_inv[0],
-                self.multi_goal_prior_init[0].K if multi_goal_states is not None else None,
-                start_state[..., :self.dim],
-                goal_states=multi_goal_states[..., :self.dim],
-                tensor_args=tensor_args,
-            )
+            self.start_prior_init.K,
+            self.gp_prior_init.Q_inv[0],
+            goal_K,
+            start_state[..., :self.dim],
+            goal_states=goal_pos,
+            tensor_args=tensor_args,
+        )
         particles = self._traj_dist.sample(self.num_particles_per_goal).to(**tensor_args)
         self.traj_dim = particles.shape
         del self._traj_dist  # free memory
         return particles.flatten(0, 1).to(**self.tensor_args)
 
     def optimize(self) -> Tuple[torch.Tensor, SinkhornStepState, int]:
+        """Run the Sinkhorn Step optimization loop.
+
+        Returns:
+            trajs: optimized trajectories
+            state: final optimization state
+            iteration: number of iterations completed
+        """
         state = self.sinkhorn_step.init_state(self.flatten_trajs)
         iteration = 0
         while self.sinkhorn_step._continue(state, iteration):
             state = self.sinkhorn_step.step(state, iteration, traj_dim=self.traj_dim)
             trajs = state.X.view(self.traj_dim)
-            # option to hard fixing start and goal states
+            # option to hard fix start and goal states
             if self.fixed_start:
                 trajs[:, :, 0, :] = self.start_state
-            if self.fixed_goal:
+            if self.fixed_goal and self.multi_goal_states is not None:
                 trajs[:, :, -1, :] = self.multi_goal_states.unsqueeze(1)
             state.X = trajs.view(-1, self.state_dim)
             iteration += 1

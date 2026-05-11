@@ -3,7 +3,6 @@ from pathlib import Path
 import time
 import matplotlib.pyplot as plt
 import torch
-from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
 from mpot.ot.problem import EpsilonScheduler
 from mpot.ot.sinkhorn import Sinkhorn
@@ -18,8 +17,6 @@ from torch_robotics.torch_utils.torch_timer import TimerCUDA
 from torch_robotics.torch_utils.torch_utils import get_torch_device
 from torch_robotics.tasks.tasks import PlanningTask
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
-
-allow_ops_in_compiled_graph()
 
 
 if __name__ == "__main__":
@@ -37,44 +34,40 @@ if __name__ == "__main__":
     )
 
     robot = RobotPointMass(
-        q_limits=q_limits,  # joint limits
+        q_limits=q_limits,
         tensor_args=tensor_args
     )
 
     task = PlanningTask(
         env=env,
         robot=robot,
-        ws_limits=q_limits,  # workspace limits
+        ws_limits=q_limits,
         obstacle_cutoff_margin=0.05,
         tensor_args=tensor_args
     )
 
     # -------------------------------- Params ---------------------------------
-    # NOTE: these parameters are tuned for this environment
     step_radius = 0.15
-    probe_radius = 0.15  # probe radius >= step radius
+    probe_radius = 0.15
 
-    # NOTE: changing polytope may require tuning again
-    polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube';
+    polytope = 'cube'  # 'simplex' | 'orthoplex' | 'cube'
 
-    # Use schedulers for both epsilons (JIT-safe APIs expect schedulers)
     epsilon_sched = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
     ent_epsilon = EpsilonScheduler(target=1e-2, init=1.0, decay=1.0)
 
-    num_probe = 5  # number of probes points for each polytope vertices
-    num_particles_per_goal = 33  # number of plans per goal
+    num_probe = 5
+    num_particles_per_goal = 33
     pos_limits = [-10, 10]
     vel_limits = [-10, 10]
-    w_coll = 5e-3  # for tuning the obstacle cost
-    w_smooth = 1e-7  # for tuning the GP cost: error = w_smooth * || Phi x(t) - x(1+1) ||^2
-    sigma_gp = 0.1   # for tuning the GP cost: Q_c = sigma_gp^2 * I
-    sigma_gp_init = 1.6   # for controlling the initial GP variance: Q0_c = sigma_gp_init^2 * I
-    max_inner_iters = 100  # max inner iterations for Sinkhorn-Knopp
-    max_outer_iters = 100  # max outer iterations for MPOT
-    
+    w_coll = 5e-3
+    w_smooth = 1e-7
+    sigma_gp = 0.1
+    sigma_gp_init = 1.6
+    max_inner_iters = 100
+    max_outer_iters = 100
+
     start_state = torch.tensor([-9, -9, 0., 0.], **tensor_args)
 
-    # NOTE: change goal states here (zero vel goals)
     multi_goal_states = torch.tensor([
         [0, 9, 0., 0.],
         [9, 9, 0., 0.],
@@ -84,14 +77,14 @@ if __name__ == "__main__":
     traj_len = 64
     dt = 0.1
 
-    #--------------------------------- Cost function ---------------------------------
+    # --------------------------------- Cost function ---------------------------------
     cost_coll = CostField(
         robot, traj_len,
         field=env.occupancy_map,
-        sigma_coll=1.0,
+        sigma=1.0,
         tensor_args=tensor_args
     )
-    cost_gp = CostGPHolonomic(robot, traj_len, dt, sigma_gp, [0, 1], weight=w_smooth, tensor_args=tensor_args)
+    cost_gp = CostGPHolonomic(robot, traj_len, dt, sigma_gp, [0, 1], tensor_args=tensor_args)
     cost_func_list = [cost_coll, cost_gp]
     weights_cost_l = [w_coll, w_smooth]
     cost = CostComposite(
@@ -100,17 +93,16 @@ if __name__ == "__main__":
         tensor_args=tensor_args
     )
 
-    #--------------------------------- MPOT Init ---------------------------------
+    # --------------------------------- MPOT Init ---------------------------------
 
-    eager_sinkhorn = Sinkhorn(
+    linear_ot_solver = Sinkhorn(
         threshold=1e-6,
         inner_iterations=1,
         max_iterations=max_inner_iters,
     )
-    linear_ot_solver = torch.jit.script(eager_sinkhorn)
 
     ss_params = dict(
-        epsilon=epsilon_sched,      # <-- changed from float to scheduler
+        epsilon=epsilon_sched,
         ent_epsilon=ent_epsilon,
         step_radius=step_radius,
         probe_radius=probe_radius,
@@ -144,10 +136,7 @@ if __name__ == "__main__":
     )
     planner = MPOT(**mpot_params)
 
-    # NOTE: JIT the solver!
-    planner.sinkhorn_step.core = torch.jit.script(planner.sinkhorn_step.core)
-
-    #--------------------------------- Optimize ---------------------------------
+    # --------------------------------- Optimize ---------------------------------
 
     with TimerCUDA() as t:
         trajs, optim_state, opt_iters = planner.optimize()

@@ -1,7 +1,0 @@
-scipy
-numpy
-matplotlib
-labmaze
-torch 
-einops
-torch_robotics @ git+https://github.com/anindex/torch_robotics.git@68d28399ff67f34ca3be0130acdc7cba2fabd61b

@@ -1,13 +1,15 @@
 import torch
+import math
 
-# ---------------------------------------------
-# TorchScript-friendly 2D rotation block maker
-# ---------------------------------------------
-@torch.jit.script
+
 def rotation_matrix(theta: torch.Tensor) -> torch.Tensor:
-    """
-    theta: (...,) angles (radians)
-    returns: (..., 2, 2) rotation matrices with blocks [[c, -s],[s, c]]
+    """Build 2x2 rotation matrices from angles.
+
+    Args:
+        theta: (...,) angles in radians
+
+    Returns:
+        Rotation matrices of shape (..., 2, 2)
     """
     if theta.ndim == 0:
         theta = theta.unsqueeze(0)
@@ -23,31 +25,32 @@ def rotation_matrix(theta: torch.Tensor) -> torch.Tensor:
     return mats.reshape(theta.shape + (2, 2,))
 
 
-# -------------------------------------------------------
-# Maximal torus (block-diagonal 2x2 rotations) generator
-# -------------------------------------------------------
-@torch.jit.script
 def get_random_maximal_torus_matrix(
     origin: torch.Tensor,
     angle_min: float = 0.0,
-    angle_max: float = 6.283185307179586  # 2*pi as a literal for TorchScript defaults
+    angle_max: float = 2.0 * math.pi,
 ) -> torch.Tensor:
-    """
-    origin: (batch, dim) or (dim,)
-    returns: (batch, dim, dim) block-diagonal rotation matrices with 2x2 blocks
-             using independent random angles per block.
+    """Generate random block-diagonal rotation matrices via maximal torus.
+
+    Each matrix consists of independent 2x2 rotation blocks along the diagonal.
+    Only supports even-dimensional inputs.
+
+    Args:
+        origin: (batch, dim) or (dim,)
+        angle_min: minimum rotation angle
+        angle_max: maximum rotation angle
+
+    Returns:
+        Rotation matrices of shape (batch, dim, dim)
     """
     if origin.ndim == 1:
         origin = origin.unsqueeze(0)
-    batch = int(origin.shape[0])
-    dim = int(origin.shape[1])
+    batch, dim = origin.shape
     assert dim % 2 == 0, "Only even dimensions are supported."
 
     k = dim // 2
-    # Sample angles per (batch, block)
     theta = torch.rand((batch, k), dtype=origin.dtype, device=origin.device) * (angle_max - angle_min) + angle_min
 
-    # Build block-diagonal matrix
     M = torch.zeros((batch, dim, dim), dtype=origin.dtype, device=origin.device)
     for j in range(k):
         c = torch.cos(theta[:, j])
@@ -61,74 +64,48 @@ def get_random_maximal_torus_matrix(
     return M
 
 
-# -------------------------------------------------------
-# Uniform (Haar) random rotation via Householder products
-# (Stewart 1980). Produces SO(n) matrices.
-# -------------------------------------------------------
-@torch.jit.script
 def get_random_uniform_rot_matrix(origin: torch.Tensor) -> torch.Tensor:
-    """
-    origin: (batch, dim) or (dim,)
-    returns: (batch, dim, dim) random rotations ~ Haar(SO(dim))
+    """Generate Haar-uniform random rotation matrices via Householder products.
+
+    Implements Stewart (1980) for generating SO(n) matrices.
+
+    Args:
+        origin: (batch, dim) or (dim,)
+
+    Returns:
+        Rotation matrices of shape (batch, dim, dim) with det = 1
     """
     if origin.ndim == 1:
         origin = origin.unsqueeze(0)
-    batch = int(origin.shape[0])
-    dim = int(origin.shape[1])
+    batch, dim = origin.shape
 
     H = torch.eye(dim, dtype=origin.dtype, device=origin.device).unsqueeze(0).repeat(batch, 1, 1)
     D = torch.ones((batch, dim), dtype=origin.dtype, device=origin.device)
 
-    eps = torch.tensor(1e-12, dtype=origin.dtype, device=origin.device)
+    eps = 1e-12
 
     for i in range(1, dim):
         m = dim - i + 1
         v = torch.randn((batch, m), dtype=origin.dtype, device=origin.device)
 
-        # sign of first component
         D[:, i - 1] = torch.sign(v[:, 0])
 
-        # v := v - sign(v0)*||v||*e1  (avoid .norm())
-        v_sqsum = (v * v).sum(1)                  # (batch,)
-        v_norm = torch.sqrt(v_sqsum + eps)        # (batch,)
-        v[:, 0] = v[:, 0] - D[:, i - 1] * v_norm  # broadcast-safe
+        v_sqsum = (v * v).sum(1)
+        v_norm = torch.sqrt(v_sqsum + eps)
+        v[:, 0] = v[:, 0] - D[:, i - 1] * v_norm
 
-        # Householder: I - 2 * v v^T / (v^T v)
-        denom = (v * v).sum(1) + eps              # (batch,)
-        beta = 2.0 / denom                        # (batch,)
-        outer = v.unsqueeze(2) * v.unsqueeze(1)   # (batch, m, m)
+        denom = (v * v).sum(1) + eps
+        beta = 2.0 / denom
+        outer = v.unsqueeze(2) * v.unsqueeze(1)
         I_m = torch.eye(m, dtype=origin.dtype, device=origin.device).unsqueeze(0).repeat(batch, 1, 1)
-        Hx = I_m - beta.view(batch, 1, 1) * outer # (batch, m, m)
+        Hx = I_m - beta.view(batch, 1, 1) * outer
 
-        # Embed into full-sized T
         T = torch.eye(dim, dtype=origin.dtype, device=origin.device).unsqueeze(0).repeat(batch, 1, 1)
         T[:, i - 1:, i - 1:] = Hx
         H = torch.matmul(H, T)
 
-    # Set final sign in D so det = 1  (factor = -1 if dim even, +1 if dim odd)
     factor = -1.0 if (dim % 2) == 0 else 1.0
     D[:, -1] = factor * torch.prod(D[:, :-1], 1)
 
-    # R = H * diag(D)
     R = torch.matmul(H, torch.diag_embed(D))
     return R
-
-
-# -------------------------
-# Quick manual smoke test
-# (not part of scripting)
-# -------------------------
-if __name__ == "__main__":
-    B, D = 4, 8
-    x = torch.zeros(B, D)
-
-    # Script checks
-    torch.jit.script(rotation_matrix)
-    torch.jit.script(get_random_maximal_torus_matrix)
-    torch.jit.script(get_random_uniform_rot_matrix)
-
-    M = get_random_maximal_torus_matrix(x)
-    R = get_random_uniform_rot_matrix(x)
-    print(M.shape, R.shape)
-    # Determinants close to 1
-    print(torch.det(R))

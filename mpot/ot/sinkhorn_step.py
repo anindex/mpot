@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import torch
 from mpot.ot.problem import LinearProblem, EpsilonScheduler, SinkhornStepState
 from mpot.ot.sinkhorn import Sinkhorn
@@ -6,37 +6,13 @@ from mpot.utils.polytopes import get_sampled_polytope_vertices, POLYTOPE_MAP
 from mpot.utils.misc import MinMaxCenterScaler
 
 
-# -----------------------------
-# TorchScript-friendly helpers
-# -----------------------------
-
-@torch.jit.script
 def _scheduled_radii(step_radius0: float, probe_radius0: float, eps: float) -> Tuple[float, float]:
     factor = 1.0 - eps
     return step_radius0 * factor, probe_radius0 * factor
 
 
-# -----------------------------
-# Fully scripted core
-# -----------------------------
-@torch.jit.script
 class SinkhornStepCore:
-    dim: int
-    step_radius0: float
-    probe_radius0: float
-    num_probe: int
-    min_iterations: int
-    max_iterations: int
-    threshold: float
-    store_outer_evals: bool
-    store_history: bool
-    scale_cost: float
-
-    epsilon: EpsilonScheduler
-    ent_epsilon: EpsilonScheduler
-    linear_ot_solver: Sinkhorn
-    polytope_vertices: torch.Tensor
-    state_scalers: List[MinMaxCenterScaler]
+    """Core Sinkhorn Step logic for trajectory optimization."""
 
     def __init__(
         self,
@@ -74,10 +50,9 @@ class SinkhornStepCore:
         self.store_history = bool(store_history)
 
     def init_state(self, X_init: torch.Tensor) -> SinkhornStepState:
-        n = int(X_init.shape[0])
+        n = X_init.shape[0]
         T = self.max_iterations
 
-        # Use zero-size tensors instead of None for JIT
         if self.store_history:
             X_history = torch.zeros((T, n, self.dim), dtype=X_init.dtype, device=X_init.device)
         else:
@@ -115,11 +90,10 @@ class SinkhornStepCore:
         self,
         state: SinkhornStepState,
         iteration: int,
-        # Precomputed inputs (script-friendly):
-        C: torch.Tensor,                 # (n, m) cost matrix
-        X_vertices: torch.Tensor         # (n, m, dim) sampled vertices matching C
+        C: torch.Tensor,
+        X_vertices: torch.Tensor,
     ) -> SinkhornStepState:
-        # Dual-Sinkhorn (uniform a,b defaulted inside LinearProblem)
+        # Dual-Sinkhorn with uniform marginals
         ot_prob = LinearProblem(
             C, self.ent_epsilon,
             torch.ones((C.shape[0],), dtype=C.dtype, device=C.device) / float(C.shape[0]),
@@ -132,10 +106,10 @@ class SinkhornStepCore:
         W, res = self.linear_ot_solver.run(ot_prob, fu0, gv0, True)
 
         # Barycentric projection
-        denom = state.a.unsqueeze(-1)          # (n,1)
+        denom = state.a.unsqueeze(-1)
         X_new = torch.einsum('nmd,nm->nd', X_vertices, W / denom)
 
-        if int(state.X_history.numel()) > 0:
+        if state.X_history.numel() > 0:
             state.X_history[iteration] = X_new
 
         state.linear_convergence[iteration] = float(res.converged_at)
@@ -145,22 +119,22 @@ class SinkhornStepCore:
         return state
 
 
-# -----------------------------------------------------------
-# Python wrapper (eager): computes C via objective_fn, then
-# delegates to scripted core.step_core(...)
-# -----------------------------------------------------------
 class SinkhornStep:
-    """Eager wrapper with the same ergonomics; JIT should use SinkhornStepCore."""
+    """Sinkhorn Step optimizer for trajectory optimization.
+
+    Wraps SinkhornStepCore with objective function evaluation and
+    polytope sampling logic.
+    """
 
     def __init__(
         self,
         dim: int,
-        objective_fn,                     # Python callable: __call__(X_probe, current_trajs, optim_dim, **kwargs), .cost(X, **kwargs)
+        objective_fn,
         linear_ot_solver: Sinkhorn,
         epsilon: EpsilonScheduler,
         ent_epsilon: EpsilonScheduler,
         polytope_type: str = 'orthoplex',
-        state_scalers: List[MinMaxCenterScaler] = (),
+        state_scalers: Optional[List[MinMaxCenterScaler]] = None,
         scale_cost: float = 1.0,
         step_radius: float = 1.0,
         probe_radius: float = 2.0,
@@ -170,10 +144,12 @@ class SinkhornStep:
         threshold: float = 1e-3,
         store_outer_evals: bool = False,
         store_history: bool = False,
-        tensor_args: dict = None,
+        tensor_args: Optional[dict] = None,
     ):
         if tensor_args is None:
             tensor_args = {'device': 'cpu', 'dtype': torch.float32}
+        if state_scalers is None:
+            state_scalers = []
 
         self.objective_fn = objective_fn
         polytope_vertices = POLYTOPE_MAP[polytope_type](torch.zeros((dim,), **tensor_args))
@@ -200,16 +176,16 @@ class SinkhornStep:
         return self.core.init_state(X_init)
 
     def step(self, state: SinkhornStepState, iteration: int, **kwargs) -> SinkhornStepState:
-        # 1) schedule radii (don’t mutate inside core)
+        # 1) schedule radii
         eps = self.core.epsilon.at(iteration)
         sr, pr = _scheduled_radii(self.core.step_radius0, self.core.probe_radius0, eps)
 
-        # 2) scale state (for consistent sampling)
+        # 2) scale state for consistent sampling
         X = state.X.clone()
         for sc in self.core.state_scalers:
             sc(X)
 
-        # 3) sample polytope around X (wrapper computes probes so we can build C)
+        # 3) sample polytope around X
         X_vertices, X_probe, _ = get_sampled_polytope_vertices(
             X, polytope_vertices=self.core.polytope_vertices,
             step_radius=sr, probe_radius=pr, num_probe=self.core.num_probe
@@ -225,17 +201,17 @@ class SinkhornStep:
         C = self.objective_fn(X_probe, current_trajs=state.X, optim_dim=optim_dim, **kwargs)
 
         # (optional) store outer eval
-        if int(state.costs.numel()) > 0:
+        if state.costs.numel() > 0:
             state.costs[iteration] = self.objective_fn.cost(
                 torch.einsum('nmd,nm->nd', X_vertices, torch.ones_like(C[..., 0]) / state.a.unsqueeze(-1)),
                 **kwargs
             ).mean()
 
-        # 6) run scripted core
+        # 6) run core step
         return self.core.step_core(state, iteration, C, X_vertices)
-    
-    def _converged(self, state, iteration: int) -> bool:
+
+    def _converged(self, state: SinkhornStepState, iteration: int) -> bool:
         return self.core._converged(state, iteration)
 
-    def _continue(self, state, iteration: int) -> bool:
+    def _continue(self, state: SinkhornStepState, iteration: int) -> bool:
         return self.core._continue(state, iteration)

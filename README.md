@@ -1,75 +1,94 @@
 # Accelerating Motion Planning via Optimal Transport
 
-This repository implements Motion Planning via Optimal Transport `mpot` in PyTorch. 
-The philosophy of `mpot` follows the Monte Carlo methods' argument, i.e., more samples could discover more better modes with high enough initialization variances.
-In other words, within the multi-modal motion planning scope, `mpot` enables better **brute-force** planning with GPU vectorization. This enhances robustness against bad local minima, a common issue in optimization-based motion planning.
+[![arXiv](https://img.shields.io/badge/arXiv-2309.15970-B31B1B.svg?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2309.15970)
+[![NeurIPS 2023](https://img.shields.io/badge/NeurIPS-2023-blue.svg?style=for-the-badge)](https://neurips.cc/virtual/2023/poster/71792)
+
+This repository implements Motion Planning via Optimal Transport (`mpot`) in PyTorch.
+The philosophy of `mpot` follows the Monte Carlo methods' argument: more samples discover more and better modes with high enough initialization variances.
+Within the multi-modal motion planning scope, `mpot` performs **brute-force** parallel planning on GPU, mitigating local minima traps common in optimization-based motion planning.
 
 <p float="middle">
   <img src="demos/occupancy.gif" width="32%" />
-  <img src="demos/sdf_grid.gif" width="32%" /> 
+  <img src="demos/sdf_grid.gif" width="32%" />
   <img src="demos/panda.gif" width="32%" />
 </p>
 
 For those interested in standalone Sinkhorn Step as a general-purpose batch gradient-free solver for non-convex optimization problems, please check out [ssax](https://github.com/anindex/ssax).
 
-## Paper Preprint
+## Paper
 
-This work has been accepted to NeurIPS 2023. Please find the pre-print here:
+This work has been accepted to **NeurIPS 2023**. Please find the paper on [arXiv](https://arxiv.org/abs/2309.15970).
 
-[<img src="https://img.shields.io/badge/arxiv-%23B31B1B.svg?&style=for-the-badge&logo=arxiv&logoColor=white" />](https://www.ias.informatik.tu-darmstadt.de/uploads/Team/AnThaiLe/mpot_preprint.pdf)
+## Requirements
+
+- Python >= 3.9
+- PyTorch >= 2.0 (with CUDA for GPU acceleration)
+- See `pyproject.toml` for the full dependency list
 
 ## Installation
 
-Simply activate your conda/Python environment, navigate to `mpot` root directory and run
+Activate your conda/virtual environment, navigate to the `mpot` root directory, and run:
 
-```azure
+```bash
 pip install -e .
 ```
 
-`mpot` algorithm is specifically designed to work with GPU. Please check if you have installed PyTorch with the CUDA option. 
+`mpot` requires GPU for practical performance. Please verify PyTorch CUDA support:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available())"
+```
 
 ## Examples
 
-Please find in `examples/` folder the demo of vectorized planning in planar environments with occupancy map:
+### Planar Occupancy Map
 
-```azure
+```bash
 python examples/mpot_occupancy.py
 ```
 
-and with signed-distance-field (SDF):
+### Planar Signed Distance Field (SDF)
 
-```azure
+```bash
 python examples/mpot_sdf.py
 ```
 
-We also added a demo with vectorized Panda planning with dense obstacle environments (SDF):
+### Panda Robot Arm (7-DOF, dense obstacles)
 
-```azure
+```bash
 python examples/mpot_panda.py
 ```
 
-Every run is associated with **a different seed**. The resulting optimization visualizations are stored at your current directory.
-Please refer to the example scripts for playing around with options and different goal points. Note that for all cases, we normalize the joint space to the joint limits and velocity limits, then perform Sinkhorn Step on the normalized state-space. Changing any hyperparameters may require tuning again.
+Every run uses a **different random seed**. The resulting optimization visualizations are stored in the current directory.
+Refer to the example scripts for playing around with options and different goal points.
 
-**Tuning Tips**: The most sensitive parameters are:
+> **Note:** For all cases, we normalize the joint space to the joint and velocity limits, then perform Sinkhorn Step on the normalized state-space. Changing any hyperparameters may require tuning again.
 
-- `polytope`: for small state-dimension that is less than 10, `cube` is a good choice. For much higer state-dimension, the sensible choices are `orthoplex` or `simplex`.
-- `step_radius`: the step size.
-- `probe_radius`: the probing radius, which projects towards polytope vertices to compute cost-to-go. Note, `probe_radius` >= `step_radius`.
-- `num_probe`: number of probing points along the probe radius. This is critical for optimizing performance, usually 3-5 is enough.
-- `epsilon`: decay rate of the step/probe size, usually 0.01-0.05.
-- `ent_epsilon`: Sinkhorn entropy regularization, usually 1e-2 to 5e-2 for balancing between optimal coupling's sharpness and speed.
-- Various cost term weightings. This depends on your applications.
+## Tuning Tips
+
+The most sensitive parameters are:
+
+| Parameter | Description | Guidance |
+|---|---|---|
+| `polytope` | Polytope geometry for directional probing | `cube` for dim < 10; `orthoplex` or `simplex` for higher dimensions |
+| `step_radius` | Step size per iteration | Start small (0.03-0.15), increase if convergence is slow |
+| `probe_radius` | Probing radius (must be >= `step_radius`) | Controls exploration range around current waypoints |
+| `num_probe` | Probe points per polytope vertex | 3-5 is usually sufficient |
+| `epsilon` | Decay rate of step/probe size | 0.01-0.05 typical |
+| `ent_epsilon` | Sinkhorn entropy regularization | 1e-2 to 5e-2 balances coupling sharpness vs. speed |
+| Cost weights | `w_coll`, `w_smooth` | Application-dependent; tune for your environment |
 
 ## Troubleshooting
 
-If you encounter memory problems, try:
-
-```azure
-export 'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512'
+**CUDA Memory Issues:**
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 ```
 
-to reduce memory fragmentation.
+**Common Issues:**
+- If optimization diverges, reduce `step_radius` and `probe_radius`
+- For high-dimensional problems (e.g., 7-DOF robot), use `orthoplex` polytope to reduce vertex count
+- Reduce `num_particles_per_goal` if running out of GPU memory
 
 ## Acknowledgement
 
@@ -77,12 +96,13 @@ The Gaussian Process prior implementation is adapted from Sasha Lambert's [`mpc_
 
 ## Citation
 
-If you found this repository useful, please consider citing these references:
+If you found this repository useful, please consider citing:
 
-```azure
+```bibtex
 @inproceedings{le2023accelerating,
   title={Accelerating Motion Planning via Optimal Transport},
   author={Le, An T. and Chalvatzaki, Georgia and Biess, Armin and Peters, Jan},
   booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
   year={2023}
 }
+```
